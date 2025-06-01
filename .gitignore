@@ -1,0 +1,12 @@
+# Xcode
+build/
+*.xcuserdata/
+**/xcuserdata/
+*.xcworkspace/xcuserdata/
+DerivedData/
+
+# macOS
+.DS_Store
+
+# Personal files
+TODO.md 
