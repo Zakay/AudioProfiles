@@ -1,5 +1,7 @@
 # AudioProfiles
 
+![256-mac](https://github.com/user-attachments/assets/4578eb94-256d-4889-9454-082f79b651bd)
+
 **macOS Audio Profile Manager**
 
 AudioProfiles automatically switches audio input/output devices based on customizable profiles and hardware presence detection.
@@ -59,6 +61,10 @@ If you see something in the codebase that could have been architected better, or
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
+## Screenshots
+<img width="605" alt="image" src="https://github.com/user-attachments/assets/c91a487e-cce3-4a75-8359-251b53f78f85" />
+<img width="796" alt="image" src="https://github.com/user-attachments/assets/67902de6-ccfb-4161-b37f-ce29091c6e16" />
+<img width="296" alt="image" src="https://github.com/user-attachments/assets/dd20863a-f57c-4b1c-a06a-002f56b25746" />
 
 ---
 
