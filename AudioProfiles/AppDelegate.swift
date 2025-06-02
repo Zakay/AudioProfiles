@@ -7,6 +7,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // Set up the status item first
     statusItemManager.setupStatusItem()
     
+    // Initialize device monitoring for real-time change detection
+    _ = AudioDeviceMonitor.shared
+    
     // Initialize hotkeys
     HotkeyCoordinator.shared.setupHotkeys()
     

@@ -28,6 +28,7 @@ class ProfileManager: ObservableObject {
     private let deviceService = ProfileDeviceService()
     private let persistenceService = ProfilePersistenceService()
     private let validationService = ProfileValidationService()
+    private let notificationService = ProfileSwitchNotificationService.shared
     
     private var cancellables = Set<AnyCancellable>()
     
@@ -39,6 +40,9 @@ class ProfileManager: ObservableObject {
     @Published private(set) var isAutoSwitchingDisabled: Bool = false
     @Published private(set) var autoSwitchingDisabledUntil: Date?
     @Published private(set) var remainingDisableTime: String?
+    
+    // Timestamp-based manual override tracking
+    private var lastManualSwitchTimestamp: Date?
     
     // Auto-switching disable timer
     private var autoSwitchingTimer: Timer?
@@ -127,6 +131,9 @@ class ProfileManager: ObservableObject {
         isAutoSwitchingDisabled = true
         autoSwitchingDisabledUntil = endDate
         
+        // Clear manual override - intentional disable takes precedence
+        clearManualOverride()
+        
         // Clear existing timers
         autoSwitchingTimer?.invalidate()
         displayUpdateTimer?.invalidate()
@@ -201,11 +208,49 @@ class ProfileManager: ObservableObject {
         return remainingDisableTime
     }
     
+    /// Check if a trigger should be applied based on device connection timestamps
+    /// Returns true if the trigger device was connected after the last manual switch
+    func shouldApplyTrigger(forDeviceIDs triggerDeviceIDs: [String]) -> Bool {
+        // Always allow triggers if no manual switch has occurred
+        guard let lastManualSwitch = lastManualSwitchTimestamp else {
+            return true
+        }
+        
+        // Check if any trigger device was connected after the manual switch
+        let deviceHistoryService = AudioDeviceHistoryService.shared
+        
+        for deviceID in triggerDeviceIDs {
+            if let deviceEntry = deviceHistoryService.deviceHistory[deviceID],
+               deviceEntry.isCurrentlyActive,
+               deviceEntry.lastSeen > lastManualSwitch {
+                // This trigger device was connected after manual switch - allow trigger
+                AppLogger.info("Trigger device '\(deviceEntry.device.name)' connected after manual switch - allowing auto-switch")
+                return true
+            }
+        }
+        
+        // All trigger devices were connected before the manual switch - block trigger
+        AppLogger.info("All trigger devices were connected before manual switch - blocking auto-switch")
+        return false
+    }
+    
     // MARK: - Profile Management API
 
-    func activateProfile(with id: UUID) {
+    func activateProfile(with id: UUID, isManual: Bool = false) {
         guard let profile = getProfile(by: id) else { return }
+        
         activationService.activateProfile(profile)
+        
+        // Handle manual vs automatic selection differently
+        if isManual {
+            // Record manual selection timestamp
+            lastManualSwitchTimestamp = Date()
+            AppLogger.info("Manual profile selection: '\(profile.name)' - timestamp recorded")
+            notificationService.notifyManualSwitch(profileName: profile.name)
+        } else {
+            // Automatic selection - clear manual override
+            lastManualSwitchTimestamp = nil
+        }
         
         // Save as last used profile (unless it's System Default)
         if !profile.isSystemDefault {
@@ -418,5 +463,10 @@ class ProfileManager: ObservableObject {
     
     private func saveLastUsedProfileID(_ id: UUID) {
         UserDefaults.standard.set(id.uuidString, forKey: "LastUsedProfileID")
+    }
+    
+    /// Clear manual override timestamp
+    private func clearManualOverride() {
+        lastManualSwitchTimestamp = nil
     }
 }

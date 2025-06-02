@@ -12,7 +12,7 @@ class HotkeyCoordinator {
         for profile in profiles {
             if let hotkey = profile.hotkey {
                 HotkeyManager.shared.register(hotkey: hotkey) {
-                    ProfileManager.shared.activateProfile(with: profile.id)
+                    ProfileManager.shared.activateProfile(with: profile.id, isManual: true)
                 }
             }
         }
@@ -30,7 +30,7 @@ class HotkeyCoordinator {
         guard let hotkey = profile.hotkey else { return }
         
         HotkeyManager.shared.register(hotkey: hotkey) {
-            ProfileManager.shared.activateProfile(with: profile.id)
+            ProfileManager.shared.activateProfile(with: profile.id, isManual: true)
         }
         AppLogger.info("Registered hotkey \(hotkey.description) for profile '\(profile.name)'")
     }

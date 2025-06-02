@@ -83,7 +83,7 @@ struct ProfileMenuView: View {
                     .font(.caption)
             } else {
                 ForEach(profileManager.profiles) { profile in
-                    Button(action: { ProfileManager.shared.activateProfile(with: profile.id) }) {
+                    Button(action: { ProfileManager.shared.activateProfile(with: profile.id, isManual: true) }) {
                         HStack {
                             // Profile icon - consistent container
                             Image(systemName: profile.iconName)

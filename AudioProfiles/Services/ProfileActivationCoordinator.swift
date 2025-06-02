@@ -4,6 +4,8 @@ import Combine
 /// Coordinates profile activation decisions - applies best matching profile or falls back to default
 class ProfileActivationCoordinator {
     
+    private let notificationService = ProfileSwitchNotificationService.shared
+    
     /// Apply the best matching profile or handle fallback scenarios
     /// - Parameters:
     ///   - matchResult: Result from trigger matching (nil if no matches)
@@ -49,9 +51,18 @@ class ProfileActivationCoordinator {
             // Profile already active, no change needed
         } else {
             if currentActiveProfile?.id == match.profile.id {
-                AppLogger.info("🔄 Re-applying profile '\(match.profile.name)' (manual trigger - settings may have changed)")
+                AppLogger.info("Re-applying profile '\(match.profile.name)' (manual trigger - settings may have changed)")
             } else {
-                AppLogger.info("🎯 Auto-detected profile: '\(match.profile.name)' (matched \(match.matchCount) trigger device(s), primary: \(match.primaryTriggerDevice))")
+                AppLogger.info("Auto-detected profile: '\(match.profile.name)' (matched \(match.matchCount) trigger device(s), primary: \(match.primaryTriggerDevice))")
+                
+                // Show notification for triggered switch (only for new activations)
+                if !isManualTrigger {
+                    notificationService.notifyTriggeredSwitch(
+                        profileName: match.profile.name,
+                        triggerDevice: match.primaryTriggerDevice,
+                        matchCount: match.matchCount
+                    )
+                }
             }
             triggerSubject.send(match.profile.id)
         }
@@ -62,21 +73,23 @@ class ProfileActivationCoordinator {
         profiles: [Profile],
         triggerSubject: PassthroughSubject<UUID, Never>
     ) {
-        // Try to fall back to last used profile first
-        if let lastUsedProfileID = getLastUsedProfileID(),
-           let lastUsedProfile = profiles.first(where: { $0.id == lastUsedProfileID }),
-           !lastUsedProfile.isSystemDefault {
-            if currentActiveProfile?.id != lastUsedProfile.id {
-                AppLogger.info("🔄 No triggers matched - falling back to last used profile: \(lastUsedProfile.name)")
-                triggerSubject.send(lastUsedProfile.id)
-            }
-            return
-        }
-        
-        // Fall back to System Default profile if no last used profile
+        // Always fall back to System Default profile when no triggers match
+        // This provides predictable, clear behavior
         if let systemDefaultProfile = profiles.first(where: { $0.name == "System Default" }) {
             if currentActiveProfile?.id != systemDefaultProfile.id {
-                AppLogger.info("🔄 No triggers matched - falling back to System Default profile")
+                AppLogger.info("No triggers matched - falling back to System Default profile")
+                
+                // Show notification for fallback
+                // Try to determine what device was lost by checking what the current profile was triggered by
+                let lostDevice = currentActiveProfile?.triggerDeviceIDs.first.flatMap { deviceID in
+                    AudioDeviceHistoryService.shared.getDevice(by: deviceID)?.name
+                }
+                
+                notificationService.notifyFallbackSwitch(
+                    profileName: systemDefaultProfile.name,
+                    lostTriggerDevice: lostDevice
+                )
+                
                 triggerSubject.send(systemDefaultProfile.id)
             }
         } else {

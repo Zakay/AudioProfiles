@@ -6,14 +6,35 @@ class ProfileTriggerDetector {
     let triggerSubject = PassthroughSubject<UUID, Never>()
     private var lastEvaluatedDevices: Set<String> = []
     
-    // Service dependencies
+    // Service dependencies - dependency injection for clean architecture
+    private let deviceMonitor: AudioDeviceMonitor
     private let deviceAnalyzer = DeviceChangeAnalyzer()
     private let triggerMatcher = TriggerMatchingService()
     private let activationCoordinator = ProfileActivationCoordinator()
+    
+    private var cancellables = Set<AnyCancellable>()
 
-    private init() {
-        // Removed automatic device change detection
-        // Profile trigger detection is now triggered manually or by timer if needed
+    private init(deviceMonitor: AudioDeviceMonitor = AudioDeviceMonitor.shared) {
+        self.deviceMonitor = deviceMonitor
+        setupRealTimeDeviceMonitoring()
+    }
+    
+    /// Set up real-time device change monitoring
+    private func setupRealTimeDeviceMonitoring() {
+        deviceMonitor.deviceChangesSubject
+            .debounce(for: .milliseconds(500), scheduler: DispatchQueue.main) // Debounce rapid changes
+            .sink { [weak self] devices in
+                self?.handleAutomaticDeviceChange(devices: devices)
+            }
+            .store(in: &cancellables)
+            
+        AppLogger.info("Real-time device monitoring enabled")
+    }
+    
+    /// Handle automatic device changes (plug/unplug events)
+    private func handleAutomaticDeviceChange(devices: [AudioDevice]) {
+        AppLogger.debug("Real-time device change detected, evaluating triggers...")
+        evaluateTriggers(devices: devices, isManualTrigger: false)
     }
     
     /// Manually trigger auto-detection based on currently connected devices
@@ -21,11 +42,20 @@ class ProfileTriggerDetector {
     /// Always runs full evaluation regardless of device list changes
     func triggerAutoDetection() {
         let currentDevices = AudioDeviceFactory.getCurrentDevices()
-        AppLogger.info("🔄 Manual auto-detection triggered with \(currentDevices.count) devices")
+        AppLogger.info("Manual auto-detection triggered with \(currentDevices.count) devices")
         evaluateTriggers(devices: currentDevices, isManualTrigger: true)
     }
-
+    
     private func evaluateTriggers(devices: [AudioDevice], isManualTrigger: Bool) {
+        // Skip automatic triggers if intentionally disabled
+        if !isManualTrigger {
+            // Check for intentional auto-switching disable (user chose to disable)
+            if ProfileManager.shared.isAutoSwitchingDisabled {
+                AppLogger.info("Ignoring device change - auto-switching is intentionally disabled")
+                return
+            }
+        }
+        
         // 1. Analyze device changes and determine if we should proceed
         let analysisResult = deviceAnalyzer.analyzeDeviceChanges(
             devices: devices,
@@ -52,6 +82,13 @@ class ProfileTriggerDetector {
             from: profiles,
             currentDeviceIDs: analysisResult.currentDeviceIDs
         )
+        
+        // 2.5. Check if this specific trigger should be applied based on timestamps (for automatic triggers)
+        if !isManualTrigger, let match = matchResult {
+            if !ProfileManager.shared.shouldApplyTrigger(forDeviceIDs: match.profile.triggerDeviceIDs) {
+                return // Manual override is blocking this trigger
+            }
+        }
         
         // Log details if no match found
         if matchResult == nil {

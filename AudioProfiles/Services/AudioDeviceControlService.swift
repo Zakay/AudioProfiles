@@ -64,10 +64,10 @@ class AudioDeviceControlService {
         )
         
         if status == noErr {
-            AppLogger.info("✅ Set default \(deviceType) device to: \(device.name)")
+            AppLogger.info("Set default \(deviceType) device to: \(device.name)")
             return true
         } else {
-            AppLogger.error("❌ Failed to set default \(deviceType) device: \(status)")
+            AppLogger.error("Failed to set default \(deviceType) device: \(status)")
             return false
         }
     }
