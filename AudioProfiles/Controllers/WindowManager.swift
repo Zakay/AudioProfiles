@@ -1,25 +1,95 @@
 import SwiftUI
 import AppKit
 
+// MARK: - Window Configuration
+
+enum WindowType: String, CaseIterable {
+    case configuration = "configuration"
+    case about = "about"
+    case onboarding = "onboarding"
+    case autoSwitching = "autoSwitching"
+    case demo = "demo"
+}
+
+struct WindowConfiguration {
+    let title: String
+    let size: NSSize
+    let minSize: NSSize
+    let maxSize: NSSize
+    let isResizable: Bool
+    let centerOffset: CGFloat
+    let requiresRegularApp: Bool
+    let activateOnOpen: Bool
+    
+    static let configurations: [WindowType: WindowConfiguration] = [
+        .configuration: WindowConfiguration(
+            title: "Configure AudioProfiles",
+            size: NSSize(width: 530, height: 600),
+            minSize: NSSize(width: 480, height: 480),
+            maxSize: NSSize(width: 800, height: 800),
+            isResizable: true,
+            centerOffset: 80,
+            requiresRegularApp: true,
+            activateOnOpen: true
+        ),
+        .about: WindowConfiguration(
+            title: "About AudioProfiles",
+            size: NSSize(width: 400, height: 600),
+            minSize: NSSize(width: 350, height: 600),
+            maxSize: NSSize(width: 500, height: 800),
+            isResizable: false,
+            centerOffset: 0,
+            requiresRegularApp: true,
+            activateOnOpen: true
+        ),
+        .onboarding: WindowConfiguration(
+            title: "Welcome to AudioProfiles",
+            size: NSSize(width: 700, height: 600),
+            minSize: NSSize(width: 600, height: 500),
+            maxSize: NSSize(width: 900, height: 800),
+            isResizable: false,
+            centerOffset: 40,
+            requiresRegularApp: true,
+            activateOnOpen: true
+        ),
+        .autoSwitching: WindowConfiguration(
+            title: "Auto-Switching",
+            size: NSSize(width: 320, height: 300),
+            minSize: NSSize(width: 280, height: 250),
+            maxSize: NSSize(width: 400, height: 400),
+            isResizable: false,
+            centerOffset: 20,
+            requiresRegularApp: true,
+            activateOnOpen: true
+        ),
+        .demo: WindowConfiguration(
+            title: "Demo Window",
+            size: NSSize(width: 800, height: 800),
+            minSize: NSSize(width: 600, height: 600),
+            maxSize: NSSize(width: 1200, height: 1200),
+            isResizable: true,
+            centerOffset: 0,
+            requiresRegularApp: true,
+            activateOnOpen: true
+        )
+    ]
+}
+
+// MARK: - Window Manager
+
 class WindowManager: NSObject, ObservableObject {
     static let shared = WindowManager()
     
-    // Direct window references - internal for delegate access
-    internal var configurationWindow: NSWindow?
-    internal var aboutWindow: NSWindow?
-    internal var onboardingWindow: NSWindow?
-    internal var autoSwitchingWindow: NSWindow?
+    // Window storage
+    private var windows: [WindowType: NSWindow] = [:]
+    private var delegates: [WindowType: UniversalWindowDelegate] = [:]
     
-    // Strong delegate references
-    private var configurationDelegate: ConfigurationWindowDelegate?
-    private var aboutDelegate: AboutWindowDelegate?
-    private var onboardingDelegate: OnboardingWindowDelegate?
-    private var autoSwitchingDelegate: AutoSwitchingWindowDelegate?
-    
+    // Published states
     @Published var isConfigurationWindowOpen = false
     @Published var isAboutWindowOpen = false
     @Published var isOnboardingWindowOpen = false
     @Published var isAutoSwitchingWindowOpen = false
+    @Published var isDemoWindowOpen = false
     
     // MARK: - App Activation Policy Management
     
@@ -34,217 +104,166 @@ class WindowManager: NSObject, ObservableObject {
         NSApp.setActivationPolicy(.accessory)
     }
     
-    // MARK: - Configuration Window
+    // MARK: - Public Window Methods
     
     func openConfigurationWindow() {
-        NSApp.sendAction(#selector(NSPopover.performClose(_:)), to: nil, from: nil)
-        
-        if let window = configurationWindow, window.isVisible {
-            // Check if window is on the same screen as user interaction
-            if !WindowUtilities.isWindowOnCurrentScreen(window) {
-                // Move window to current screen first
-                WindowUtilities.centerWindow(window, onScreen: WindowUtilities.getCurrentInteractionScreen(), withOffset: 80)
-            }
-            
-            // Make sure app is in regular mode for proper window behavior
-            makeAppRegular()
-            
-            // Bring existing window to front and give it focus
-            window.makeKeyAndOrderFront(nil)
-            return
-        }
-        
-        // Switch to regular app behavior before creating window
-        makeAppRegular()
-        
-        configurationWindow = createConfigurationWindow()
-        isConfigurationWindowOpen = true
+        openWindow(type: .configuration, view: ConfigurationView())
     }
-    
-    // MARK: - About Window
     
     func openAboutWindow() {
-        NSApp.sendAction(#selector(NSPopover.performClose(_:)), to: nil, from: nil)
-        
-        if let window = aboutWindow, window.isVisible {
-            // Check if window is on the same screen as user interaction
-            if !WindowUtilities.isWindowOnCurrentScreen(window) {
-                // Move window to current screen first
-                WindowUtilities.centerWindow(window, onScreen: WindowUtilities.getCurrentInteractionScreen(), withOffset: 0)
-            }
-            
-            // Bring existing window to front and give it focus
-            window.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            return
-        }
-        
-        aboutWindow = createAboutWindow()
-        isAboutWindowOpen = true
-        
-        // Activate app when opening new window from menu
-        NSApp.activate(ignoringOtherApps: false)
+        openWindow(type: .about, view: AboutView())
     }
-    
-    // MARK: - Onboarding Window
     
     func openOnboardingWindow() {
-        NSApp.sendAction(#selector(NSPopover.performClose(_:)), to: nil, from: nil)
-        
-        if let window = onboardingWindow, window.isVisible {
-            // Check if window is on the same screen as user interaction
-            if !WindowUtilities.isWindowOnCurrentScreen(window) {
-                // Move window to current screen first
-                WindowUtilities.centerWindow(window, onScreen: WindowUtilities.getCurrentInteractionScreen(), withOffset: 40)
-            }
-            
-            // Bring existing window to front and give it focus
-            window.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            return
-        }
-        
-        onboardingWindow = createOnboardingWindow()
-        isOnboardingWindowOpen = true
-        
-        // Activate app when opening new window from menu
-        NSApp.activate(ignoringOtherApps: false)
+        openWindow(type: .onboarding, view: OnboardingView())
     }
     
-    // MARK: - Auto-Switching Dialog
-    
     func openAutoSwitchingDialog() {
-        NSApp.sendAction(#selector(NSPopover.performClose(_:)), to: nil, from: nil)
-        
-        if let window = autoSwitchingWindow, window.isVisible {
-            // Check if window is on the same screen as user interaction
-            if !WindowUtilities.isWindowOnCurrentScreen(window) {
-                // Move window to current screen first
-                WindowUtilities.centerWindow(window, onScreen: WindowUtilities.getCurrentInteractionScreen(), withOffset: 20)
-            }
-            
-            // Bring existing window to front and give it focus
-            window.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            return
-        }
-        
-        autoSwitchingWindow = createAutoSwitchingWindow()
-        isAutoSwitchingWindowOpen = true
-        
-        // Activate app when opening new window from menu
-        NSApp.activate(ignoringOtherApps: false)
+        openWindow(type: .autoSwitching, view: AutoSwitchingDialogView())
+    }
+    
+    func openDemoWindow() {
+        openWindow(type: .demo, view: DemoView())
     }
     
     func closeAllWindows() {
-        configurationWindow?.close()
-        aboutWindow?.close()
-        onboardingWindow?.close()
-        autoSwitchingWindow?.close()
+        windows.values.forEach { $0.close() }
     }
     
-    // MARK: - Private Implementation
+    // MARK: - Generic Window Management
     
-    private func createConfigurationWindow() -> NSWindow {
-        let window = createWindow(
-            title: "Configure AudioProfiles",
-            view: AnyView(ConfigurationView()),
-            size: NSSize(width: 500, height: 600),
-            offset: 80
-        )
+    private func openWindow<T: View>(type: WindowType, view: T) {
+        guard let config = WindowConfiguration.configurations[type] else {
+            assertionFailure("No configuration found for window type: \(type)")
+            return
+        }
         
-        configurationDelegate = ConfigurationWindowDelegate()
-        window.delegate = configurationDelegate
-        return window
-    }
-    
-    private func createAboutWindow() -> NSWindow {
-        let window = createWindow(
-            title: "About AudioProfiles",
-            view: AnyView(AboutView()),
-            size: NSSize(width: 400, height: 500),
-            offset: 0
-        )
+        // Close any popovers
+        NSApp.sendAction(#selector(NSPopover.performClose(_:)), to: nil, from: nil)
         
-        aboutDelegate = AboutWindowDelegate()
-        window.delegate = aboutDelegate
-        return window
-    }
-    
-    private func createOnboardingWindow() -> NSWindow {
-        let window = createWindow(
-            title: "Welcome to AudioProfiles",
-            view: AnyView(OnboardingView()),
-            size: NSSize(width: 700, height: 600),
-            offset: 40
-        )
+        // Handle existing window
+        if let existingWindow = windows[type], existingWindow.isVisible {
+            handleExistingWindow(existingWindow, config: config)
+            return
+        }
         
-        onboardingDelegate = OnboardingWindowDelegate()
-        window.delegate = onboardingDelegate
-        return window
-    }
-    
-    private func createAutoSwitchingWindow() -> NSWindow {
-        let window = createWindow(
-            title: "Auto-Switching",
-            view: AnyView(AutoSwitchingDialogView()),
-            size: NSSize(width: 320, height: 300),
-            offset: 20
-        )
+        // Create new window
+        let window = createWindow(type: type, view: view, config: config)
+        windows[type] = window
+        updatePublishedState(for: type, isOpen: true)
         
-        autoSwitchingDelegate = AutoSwitchingWindowDelegate()
-        window.delegate = autoSwitchingDelegate
-        return window
+        // Handle app activation
+        if config.requiresRegularApp {
+            makeAppRegular()
+        }
+        if config.activateOnOpen {
+            NSApp.activate(ignoringOtherApps: false)
+        }
     }
     
-    private func createWindow(title: String, view: AnyView, size: NSSize, offset: CGFloat) -> NSWindow {
+    private func handleExistingWindow(_ window: NSWindow, config: WindowConfiguration) {
+        // Move to current screen if needed
+        if !WindowUtilities.isWindowOnCurrentScreen(window) {
+            WindowUtilities.centerWindow(
+                window, 
+                onScreen: WindowUtilities.getCurrentInteractionScreen(), 
+                withOffset: config.centerOffset
+            )
+        }
+        
+        // Handle app activation for existing windows
+        if config.requiresRegularApp {
+            makeAppRegular()
+        }
+        
+        // Bring to front
+        window.makeKeyAndOrderFront(nil)
+        if config.activateOnOpen {
+            NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+    
+    private func createWindow<T: View>(type: WindowType, view: T, config: WindowConfiguration) -> NSWindow {
         let hostingController = NSHostingController(rootView: view)
         
-        let window = WindowUtilities.createStandardWindow(title: title, size: size, offset: offset)
-        window.contentViewController = hostingController
+        var styleMask: NSWindow.StyleMask = [.titled, .closable, .miniaturizable]
+        if config.isResizable {
+            styleMask.insert(.resizable)
+        }
         
+        let window = NSWindow(
+            contentRect: NSRect(origin: .zero, size: config.size),
+            styleMask: styleMask,
+            backing: .buffered,
+            defer: false
+        )
+        
+        // Configure window
+        window.title = config.title
+        window.contentViewController = hostingController
+        window.isReleasedWhenClosed = false
+        window.level = .normal
+        
+        // Set size constraints
+        window.setContentSize(config.size)
+        window.minSize = config.minSize
+        window.maxSize = config.maxSize
+        
+        // Center window
+        WindowUtilities.centerWindow(window, withOffset: config.centerOffset)
         window.makeKeyAndOrderFront(nil)
+        
+        // Set up delegate
+        let delegate = UniversalWindowDelegate(windowType: type, windowManager: self)
+        delegates[type] = delegate
+        window.delegate = delegate
         
         return window
     }
-}
-
-// MARK: - Window Delegates
-private class ConfigurationWindowDelegate: NSObject, NSWindowDelegate {
-    func windowShouldClose(_ sender: NSWindow) -> Bool {
-        WindowManager.shared.configurationWindow = nil
-        WindowManager.shared.isConfigurationWindowOpen = false
+    
+    // MARK: - Internal Methods
+    
+    internal func windowDidClose(type: WindowType) {
+        windows[type] = nil
+        delegates[type] = nil
+        updatePublishedState(for: type, isOpen: false)
         
-        // Revert to menu bar only behavior when configuration window closes
-        WindowManager.shared.makeAppAccessory()
-        
-        sender.orderOut(nil)
-        return false
+        // Handle app policy changes
+        if type == .configuration {
+            makeAppAccessory()
+        }
+    }
+    
+    private func updatePublishedState(for type: WindowType, isOpen: Bool) {
+        switch type {
+        case .configuration:
+            isConfigurationWindowOpen = isOpen
+        case .about:
+            isAboutWindowOpen = isOpen
+        case .onboarding:
+            isOnboardingWindowOpen = isOpen
+        case .autoSwitching:
+            isAutoSwitchingWindowOpen = isOpen
+        case .demo:
+            isDemoWindowOpen = isOpen
+        }
     }
 }
 
-private class AboutWindowDelegate: NSObject, NSWindowDelegate {
-    func windowShouldClose(_ sender: NSWindow) -> Bool {
-        WindowManager.shared.aboutWindow = nil
-        WindowManager.shared.isAboutWindowOpen = false
-        sender.orderOut(nil)
-        return false
-    }
-}
+// MARK: - Universal Window Delegate
 
-private class OnboardingWindowDelegate: NSObject, NSWindowDelegate {
-    func windowShouldClose(_ sender: NSWindow) -> Bool {
-        WindowManager.shared.onboardingWindow = nil
-        WindowManager.shared.isOnboardingWindowOpen = false
-        sender.orderOut(nil)
-        return false
+private class UniversalWindowDelegate: NSObject, NSWindowDelegate {
+    private let windowType: WindowType
+    private weak var windowManager: WindowManager?
+    
+    init(windowType: WindowType, windowManager: WindowManager) {
+        self.windowType = windowType
+        self.windowManager = windowManager
+        super.init()
     }
-}
-
-private class AutoSwitchingWindowDelegate: NSObject, NSWindowDelegate {
+    
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        WindowManager.shared.autoSwitchingWindow = nil
-        WindowManager.shared.isAutoSwitchingWindowOpen = false
+        windowManager?.windowDidClose(type: windowType)
         sender.orderOut(nil)
         return false
     }

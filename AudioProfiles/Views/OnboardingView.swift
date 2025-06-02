@@ -381,7 +381,7 @@ struct SmartSwitchingVisual: View {
                         .font(.system(size: 40))
                         .foregroundColor(isConnected ? .green : .secondary)
                         .animation(.easeInOut, value: isConnected)
-                    Text("AirPods Pro")
+                    Text("AirPods Max")
                         .font(.caption)
                         .foregroundColor(isConnected ? .green : .secondary)
                         .animation(.easeInOut, value: isConnected)

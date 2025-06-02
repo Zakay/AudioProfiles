@@ -13,190 +13,195 @@ struct ConfigurationView: View {
     private let formatter = ProfileDisplayFormatter()
     
     var body: some View {
-        // Content
         VStack(spacing: 16) {
             // Profiles List Section
             VStack(alignment: .leading, spacing: 12) {
-                VStack(spacing: 0) {
-                    List {
-                        ForEach(profileManager.profiles, id: \.id) { profile in
-                            HStack(spacing: 12) {
-                                // Profile Icon
-                                Image(systemName: profile.iconName)
-                                    .font(.title2)
-                                    .frame(width: 28, height: 28)
-                                    .background(
-                                        RoundedRectangle(cornerRadius: 6)
-                                            .fill(Color.secondary.opacity(0.1))
-                                    )
-                                
-                                VStack(alignment: .leading, spacing: 4) {
-                                    HStack {
-                                        Text(profile.name)
-                                            .font(.headline)
+                HStack {
+                    Text("Audio Profiles")
+                        .font(.title2)
+                        .fontWeight(.semibold)
+                    Spacer()
+                    Button {
+                        showAddProfileSheet = true
+                    } label: {
+                        Label("Add Profile", systemImage: "plus")
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                
+                List {
+                    ForEach(profileManager.profiles, id: \.id) { profile in
+                        HStack(spacing: 12) {
+                            // Profile Icon - improved styling like demo
+                            Image(systemName: profile.iconName)
+                                .font(.title2)
+                                .frame(width: 32, height: 32)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .fill(Color.accentColor.opacity(0.1))
+                                )
+                                .foregroundColor(.accentColor)
+                            
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack {
+                                    Text(profile.name)
+                                        .font(.headline)
+                                    
+                                    // Only show pills for non-system default profiles
+                                    if !profile.isSystemDefault {
+                                        // Hotkey badge
+                                        if let hotkey = profile.hotkey {
+                                            Text(hotkey.description)
+                                                .font(.caption2)
+                                                .fontWeight(.medium)
+                                                .padding(.horizontal, 8)
+                                                .padding(.vertical, 3)
+                                                .background(Color.gray.opacity(0.2))
+                                                .foregroundColor(.primary)
+                                                .cornerRadius(6)
+                                        }
                                         
-                                        // Only show pills for non-system default profiles
-                                        if !profile.isSystemDefault {
-                                            // Hotkey badge
-                                            if let hotkey = profile.hotkey {
-                                                Text(hotkey.description)
-                                                    .font(.caption2)
-                                                    .padding(.horizontal, 8)
-                                                    .padding(.vertical, 3)
-                                                    .background(Color.gray.opacity(0.2))
-                                                    .foregroundColor(.white)
-                                                    .cornerRadius(6)
-                                            }
-                                            
-                                            // Preferred mode badge
+                                        // Preferred mode badge
+                                        HStack(spacing: 4) {
+                                            Image(systemName: profile.preferredMode == .public ? "speaker.wave.2" : "headphones")
+                                                .font(.caption2)
+                                            Text(profile.preferredMode == .public ? "Public" : "Private")
+                                                .font(.caption2)
+                                        }
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 3)
+                                        .background(profile.preferredMode == .public ? Color.blue.opacity(0.2) : Color.purple.opacity(0.2))
+                                        .foregroundColor(profile.preferredMode == .public ? .blue : .purple)
+                                        .cornerRadius(6)
+                                        
+                                        // Trigger status badge with device name
+                                        if profile.triggerDeviceIDs.isEmpty {
                                             HStack(spacing: 4) {
-                                                Image(systemName: profile.preferredMode == .public ? "speaker.wave.2" : "headphones")
+                                                Image(systemName: "bolt.slash")
                                                     .font(.caption2)
-                                                Text(profile.preferredMode == .public ? "Public" : "Private")
+                                                Text("No Triggers")
                                                     .font(.caption2)
                                             }
                                             .padding(.horizontal, 8)
                                             .padding(.vertical, 3)
-                                            .background(profile.preferredMode == .public ? Color.blue.opacity(0.2) : Color.purple.opacity(0.2))
-                                            .foregroundColor(profile.preferredMode == .public ? .blue : .purple)
+                                            .background(Color.orange.opacity(0.2))
+                                            .foregroundColor(.orange)
                                             .cornerRadius(6)
-                                            
-                                            // Trigger status badge with device name
-                                            if profile.triggerDeviceIDs.isEmpty {
-                                                HStack(spacing: 4) {
-                                                    Image(systemName: "bolt.slash")
-                                                        .font(.caption2)
-                                                    Text("No Triggers")
-                                                        .font(.caption2)
-                                                }
-                                                .padding(.horizontal, 8)
-                                                .padding(.vertical, 3)
-                                                .background(Color.orange.opacity(0.2))
-                                                .foregroundColor(.orange)
-                                                .cornerRadius(6)
-                                            } else {
-                                                HStack(spacing: 4) {
-                                                    Image(systemName: "bolt")
-                                                        .font(.caption2)
-                                                    Text(formatter.triggerDevicesDisplay(for: profile))
-                                                        .font(.caption2)
-                                                }
-                                                .padding(.horizontal, 8)
-                                                .padding(.vertical, 3)
-                                                .background(Color.green.opacity(0.2))
-                                                .foregroundColor(.green)
-                                                .cornerRadius(6)
+                                        } else {
+                                            HStack(spacing: 4) {
+                                                Image(systemName: "bolt")
+                                                    .font(.caption2)
+                                                Text(formatter.triggerDevicesDisplay(for: profile))
+                                                    .font(.caption2)
                                             }
+                                            .padding(.horizontal, 8)
+                                            .padding(.vertical, 3)
+                                            .background(Color.green.opacity(0.2))
+                                            .foregroundColor(.green)
+                                            .cornerRadius(6)
                                         }
-                                        
-                                        Spacer()
                                     }
                                     
-                                    // Device configuration row with icons
-                                    HStack(spacing: 12) {
-                                        // Output device info
-                                        HStack(spacing: 4) {
-                                            Image(systemName: "speaker.wave.2")
-                                                .font(.caption)
-                                                .foregroundColor(.secondary)
-                                            
-                                            Text(deviceDisplayText(for: profile, isOutput: true))
-                                                .font(.caption)
-                                                .foregroundColor(.secondary)
-                                        }
-                                        
-                                        // Input device info
-                                        HStack(spacing: 4) {
-                                            Image(systemName: "mic")
-                                                .font(.caption)
-                                                .foregroundColor(.secondary)
-                                            
-                                            Text(deviceDisplayText(for: profile, isOutput: false))
-                                                .font(.caption)
-                                                .foregroundColor(.secondary)
-                                        }
-                                        
-                                        Spacer()
-                                    }
+                                    Spacer()
                                 }
                                 
-                                Spacer()
-                                
-                                // Show Add Profile button for System Default when it's the only profile
-                                if profile.isSystemDefault && profileManager.profiles.count == 1 {
-                                    Button {
-                                        showAddProfileSheet = true
-                                    } label: {
-                                        Image(systemName: "plus")
-                                            .font(.system(size: 16, weight: .medium))
+                                // Device configuration row with icons
+                                HStack(spacing: 16) {
+                                    // Output device info
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "speaker.wave.2")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                        
+                                        Text(deviceDisplayText(for: profile, isOutput: true))
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
                                     }
-                                    .buttonStyle(.bordered)
-                                    .help("Add your first profile")
-                                }
-                                // Only show Edit button for non-system default profiles
-                                else if !profile.isSystemDefault {
-                                    Button {
-                                        profileToEdit = profile
-                                    } label: {
-                                        Text("Edit")
+                                    
+                                    // Input device info
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "mic")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                        
+                                        Text(deviceDisplayText(for: profile, isOutput: false))
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
                                     }
-                                    .buttonStyle(.bordered)
+                                    
+                                    Spacer()
                                 }
                             }
-                            .padding(.vertical, 6)
-                            .contextMenu {
-                                // Only show delete option for non-system default profiles
-                                if !profile.isSystemDefault {
-                                    Button("Delete Profile", role: .destructive) {
-                                        profileToDelete = profile
-                                    }
+                            
+                            Spacer()
+                            
+                            // Show Add Profile button for System Default when it's the only profile
+                            if profile.isSystemDefault && profileManager.profiles.count == 1 {
+                                Button {
+                                    showAddProfileSheet = true
+                                } label: {
+                                    Image(systemName: "plus")
+                                        .font(.system(size: 16, weight: .medium))
                                 }
+                                .buttonStyle(.bordered)
+                                .help("Add your first profile")
+                            }
+                            // Only show Edit button for non-system default profiles
+                            else if !profile.isSystemDefault {
+                                Button {
+                                    profileToEdit = profile
+                                } label: {
+                                    Text("Edit")
+                                }
+                                .buttonStyle(.bordered)
                             }
                         }
-                        .onMove { sourceIndices, destinationIndex in
-                            // Prevent moving System Default or moving anything to position 0
-                            let systemDefaultExists = profileManager.profiles.first?.isSystemDefault == true
-                            
-                            // Don't allow moving if trying to move System Default
-                            if let sourceIndex = sourceIndices.first,
-                               sourceIndex == 0 && systemDefaultExists {
-                                return
-                            }
-                            
-                            // Don't allow moving to position 0 if System Default exists
-                            if destinationIndex == 0 && systemDefaultExists {
-                                return
-                            }
-                            
-                            if let sourceIndex = sourceIndices.first {
-                                profileManager.moveProfile(from: sourceIndex, to: destinationIndex)
+                        .padding(.vertical, 4)
+                        .contextMenu {
+                            // Only show delete option for non-system default profiles
+                            if !profile.isSystemDefault {
+                                Button("Delete Profile", role: .destructive) {
+                                    profileToDelete = profile
+                                }
                             }
                         }
                     }
-                    .listStyle(.inset)
-                    .frame(minHeight: 200, idealHeight: 300)
-                    
-                    // Add Profile Button - only show when there are multiple profiles
-                    if profileManager.profiles.count > 1 {
-                        HStack {
-                            Button {
-                                showAddProfileSheet = true
-                            } label: {
-                                Label("Add Profile", systemImage: "plus")
-                            }
-                            .buttonStyle(.borderedProminent)
-                            Spacer()
+                    .onMove { sourceIndices, destinationIndex in
+                        // Prevent moving System Default or moving anything to position 0
+                        let systemDefaultExists = profileManager.profiles.first?.isSystemDefault == true
+                        
+                        // Don't allow moving if trying to move System Default
+                        if let sourceIndex = sourceIndices.first,
+                           sourceIndex == 0 && systemDefaultExists {
+                            return
                         }
-                        .padding()
+                        
+                        // Don't allow moving to position 0 if System Default exists
+                        if destinationIndex == 0 && systemDefaultExists {
+                            return
+                        }
+                        
+                        if let sourceIndex = sourceIndices.first {
+                            profileManager.moveProfile(from: sourceIndex, to: destinationIndex)
+                        }
                     }
                 }
-                .background(Color(NSColor.controlBackgroundColor))
-                .cornerRadius(8)
+                .listStyle(.inset)
+                .scrollContentBackground(.hidden)
+                .frame(height: 345)
             }
+            .padding()
+            .background(Color(NSColor.controlBackgroundColor))
+            .cornerRadius(12)
             
-            
-            // App Settings Section
-            VStack(spacing: 15) {
+            // Settings Section
+            VStack(spacing: 12) {
+                HStack {
+                    Text("Settings")
+                        .font(.headline)
+                    Spacer()
+                }
+                
                 HStack {
                     if #available(macOS 13.0, *) {
                         Toggle("Launch at Login", isOn: Binding(
@@ -216,9 +221,12 @@ struct ConfigurationView: View {
             }
             .padding()
             .background(Color(NSColor.controlBackgroundColor))
-            .cornerRadius(8)
+            .cornerRadius(12)
+            
         }
-        .padding()
+        .padding(.horizontal)
+        .padding(.bottom)
+        .padding(.top, 12)
         .background(Color(NSColor.windowBackgroundColor))
         .frame(width: 530, height: 530)
         .sheet(isPresented: $showAddProfileSheet) {

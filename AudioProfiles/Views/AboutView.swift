@@ -1,12 +1,16 @@
 import SwiftUI
 
 struct AboutView: View {
+    @State private var tapCount = 0
+    @State private var lastTapTime = Date()
+    @State private var showSecretHint = false
+    
     var body: some View {
         VStack(spacing: 0) {
             // Content
             ScrollView {
                 VStack(spacing: 24) {
-                    // App Icon and Title
+                    // App Icon and Title (Secret tap area)
                     VStack(spacing: 12) {
                         if let appIcon = NSApp.applicationIconImage {
                             Image(nsImage: appIcon)
@@ -25,8 +29,21 @@ struct AboutView: View {
                         Text("macOS Audio Profile Manager")
                             .font(.title3)
                             .foregroundColor(.secondary)
+                        
+                        // Secret hint when getting close
+                        if showSecretHint {
+                            Text("\(5 - tapCount) more taps...")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .opacity(0.6)
+                                .transition(.opacity)
+                        }
                     }
                     .padding(.top, 20)
+                    .contentShape(Rectangle()) // Make entire area tappable
+                    .onTapGesture {
+                        handleSecretTap()
+                    }
                     
                     // Purpose Description
                     VStack(alignment: .leading, spacing: 12) {
@@ -81,7 +98,54 @@ struct AboutView: View {
                 }
             }
         }
-        .frame(width: 400, height: 500)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+    
+    // MARK: - Secret Demo Easter Egg
+    
+    private func handleSecretTap() {
+        let now = Date()
+        
+        // Reset counter if last tap was more than 2 seconds ago
+        if now.timeIntervalSince(lastTapTime) > 2.0 {
+            tapCount = 0
+            showSecretHint = false
+        }
+        
+        tapCount += 1
+        lastTapTime = now
+        
+        // Show hint when user reaches 3 taps
+        if tapCount >= 3 && tapCount < 5 {
+            withAnimation(.easeInOut(duration: 0.3)) {
+                showSecretHint = true
+            }
+        }
+        
+        // Open demo window on 5th tap
+        if tapCount >= 5 {
+            withAnimation(.easeInOut(duration: 0.3)) {
+                showSecretHint = false
+            }
+            
+            // Small delay for dramatic effect
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                WindowManager.shared.openDemoWindow()
+                tapCount = 0 // Reset counter
+            }
+        }
+        
+        // Auto-hide hint after 2 seconds if user stops tapping
+        if showSecretHint {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                if Date().timeIntervalSince(lastTapTime) >= 1.8 {
+                    withAnimation(.easeInOut(duration: 0.3)) {
+                        showSecretHint = false
+                        tapCount = 0
+                    }
+                }
+            }
+        }
     }
 }
 
