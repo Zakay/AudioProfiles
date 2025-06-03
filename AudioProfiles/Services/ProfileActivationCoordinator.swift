@@ -14,7 +14,7 @@ class ProfileActivationCoordinator {
     ///   - profiles: Available profiles for fallback
     ///   - triggerSubject: Subject to send profile activation events
     func applyProfileOrFallback(
-        matchResult: TriggerMatchingService.MatchResult?,
+        matchResult: ProfileTriggerDetector.MatchResult?,
         currentActiveProfile: Profile?,
         isManualTrigger: Bool,
         profiles: [Profile],
@@ -40,7 +40,7 @@ class ProfileActivationCoordinator {
     }
     
     private func applyMatchingProfile(
-        match: TriggerMatchingService.MatchResult,
+        match: ProfileTriggerDetector.MatchResult,
         currentActiveProfile: Profile?,
         isManualTrigger: Bool,
         triggerSubject: PassthroughSubject<UUID, Never>

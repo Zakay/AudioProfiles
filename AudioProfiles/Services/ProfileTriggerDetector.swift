@@ -15,9 +15,17 @@ class ProfileTriggerDetector {
         let reason: String
     }
     
+    // MARK: - Match Result
+    
+    /// Result of trigger matching analysis
+    struct MatchResult {
+        let profile: Profile
+        let matchCount: Int
+        let primaryTriggerDevice: String
+    }
+    
     // Service dependencies - dependency injection for clean architecture
     private let deviceMonitor: AudioDeviceMonitor
-    private let triggerMatcher = TriggerMatchingService()
     private let activationCoordinator = ProfileActivationCoordinator()
     
     private var cancellables = Set<AnyCancellable>()
@@ -89,6 +97,36 @@ class ProfileTriggerDetector {
         )
     }
     
+    /// Find the best matching profile based on currently connected devices
+    /// - Parameters:
+    ///   - profiles: Available profiles to check
+    ///   - currentDeviceIDs: Set of currently connected device IDs
+    /// - Returns: Best matching profile with match details, or nil if no matches
+    private func findBestMatch(from profiles: [Profile], currentDeviceIDs: Set<String>) -> MatchResult? {
+        var bestMatch: MatchResult? = nil
+        
+        for profile in profiles {
+            guard !profile.triggerDeviceIDs.isEmpty else { continue }
+            
+            let matchingDevices = profile.triggerDeviceIDs.filter { triggerID in
+                currentDeviceIDs.contains(triggerID)
+            }
+            
+            if !matchingDevices.isEmpty {
+                // Prefer profile with more matching devices, or if tied, prefer the first one found
+                if bestMatch == nil || matchingDevices.count > bestMatch!.matchCount {
+                    bestMatch = MatchResult(
+                        profile: profile,
+                        matchCount: matchingDevices.count,
+                        primaryTriggerDevice: matchingDevices.first!
+                    )
+                }
+            }
+        }
+        
+        return bestMatch
+    }
+    
     private func evaluateTriggers(devices: [AudioDevice], isManualTrigger: Bool) {
         // Skip automatic triggers if intentionally disabled
         if !isManualTrigger {
@@ -118,7 +156,7 @@ class ProfileTriggerDetector {
         let currentActiveProfile = ProfileManager.shared.activeProfile
         
         // 2. Find the best matching profile based on trigger devices
-        let matchResult = triggerMatcher.findBestMatch(
+        let matchResult = findBestMatch(
             from: profiles,
             currentDeviceIDs: analysisResult.currentDeviceIDs
         )
@@ -128,11 +166,6 @@ class ProfileTriggerDetector {
             if !ProfileManager.shared.shouldApplyTrigger(forDeviceIDs: match.profile.triggerDeviceIDs) {
                 return // Manual override is blocking this trigger
             }
-        }
-        
-        // Log details if no match found
-        if matchResult == nil {
-            triggerMatcher.logNoMatchDetails(profiles: profiles, currentDeviceIDs: analysisResult.currentDeviceIDs)
         }
         
         // 3. Apply the best matching profile or handle fallback
