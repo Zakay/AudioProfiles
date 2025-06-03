@@ -95,7 +95,7 @@ class ProfileManager: ObservableObject {
         }
         
         // Subscribe to trigger events
-        ProfileTriggerDetector.shared.triggerSubject
+        ProfileTriggerService.shared.triggerSubject
             .sink { [weak self] profileID in
                 // Only activate profile if auto-switching is not disabled
                 guard let self = self, !self.isAutoSwitchingDisabled else {
@@ -109,7 +109,7 @@ class ProfileManager: ObservableObject {
     
     /// Call this after ProfileManager initialization is complete to start auto-detection
     func startTriggerDetection() {
-        ProfileTriggerDetector.shared.triggerAutoDetection()
+        ProfileTriggerService.shared.triggerAutoDetection()
     }
     
     // MARK: - Auto-Switching Disable Management
@@ -176,7 +176,7 @@ class ProfileManager: ObservableObject {
         displayUpdateTimer = nil
         
         // Trigger auto-detection now that it's re-enabled
-        ProfileTriggerDetector.shared.triggerAutoDetection()
+        ProfileTriggerService.shared.triggerAutoDetection()
         
         AppLogger.info("Auto-switching re-enabled")
     }
@@ -299,7 +299,7 @@ class ProfileManager: ObservableObject {
         
         // Auto-trigger detection after configuration changes
         if triggerAutoDetection {
-            ProfileTriggerDetector.shared.triggerAutoDetection()
+            ProfileTriggerService.shared.triggerAutoDetection()
         }
     }
     
@@ -320,7 +320,7 @@ class ProfileManager: ObservableObject {
         }
         
         // Auto-trigger detection after profile removal
-        ProfileTriggerDetector.shared.triggerAutoDetection()
+        ProfileTriggerService.shared.triggerAutoDetection()
     }
     
     func deleteProfiles(at offsets: IndexSet) {

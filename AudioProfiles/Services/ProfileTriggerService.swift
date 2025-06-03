@@ -1,8 +1,14 @@
 import Foundation
 import Combine
 
-class ProfileTriggerDetector {
-    static let shared = ProfileTriggerDetector()
+/// Handles device-based profile triggering - detects device changes and coordinates profile switching
+/// 
+/// **Responsibility**: Complete device trigger workflow from detection to profile application
+/// **Architecture Role**: Service  
+/// **Usage**: Public API via shared singleton
+/// **Dependencies**: AudioDeviceMonitor, ProfileManager, AudioDeviceHistoryService, NotificationService
+class ProfileTriggerService {
+    static let shared = ProfileTriggerService()
     let triggerSubject = PassthroughSubject<UUID, Never>()
     private var lastEvaluatedDevices: Set<String> = []
     
@@ -24,9 +30,10 @@ class ProfileTriggerDetector {
         let primaryTriggerDevice: String
     }
     
-    // Service dependencies - dependency injection for clean architecture
+    // Service dependencies
     private let deviceMonitor: AudioDeviceMonitor
-    private let activationCoordinator = ProfileActivationCoordinator()
+    private let notificationService = ProfileSwitchNotificationService.shared
+    private let deviceHistoryService = AudioDeviceHistoryService.shared
     
     private var cancellables = Set<AnyCancellable>()
 
@@ -62,6 +69,8 @@ class ProfileTriggerDetector {
         evaluateTriggers(devices: currentDevices, isManualTrigger: true)
     }
     
+    // MARK: - Device Analysis
+    
     /// Analyze device changes and determine if trigger evaluation should proceed
     /// - Parameters:
     ///   - devices: Currently connected devices
@@ -75,7 +84,7 @@ class ProfileTriggerDetector {
     ) -> AnalysisResult {
         
         // Update device history with current devices first
-        AudioDeviceHistoryService.shared.updateDeviceHistory(with: devices)
+        deviceHistoryService.updateDeviceHistory(with: devices)
         
         let currentDeviceIDs = Set(devices.map { $0.id })
         
@@ -127,6 +136,95 @@ class ProfileTriggerDetector {
         return bestMatch
     }
     
+    // MARK: - Profile Coordination
+    
+    /// Apply the best matching profile or handle fallback scenarios
+    /// - Parameters:
+    ///   - matchResult: Result from trigger matching (nil if no matches)
+    ///   - currentActiveProfile: Currently active profile
+    ///   - isManualTrigger: Whether this was manually triggered
+    ///   - profiles: Available profiles for fallback
+    private func applyProfileOrFallback(
+        matchResult: MatchResult?,
+        currentActiveProfile: Profile?,
+        isManualTrigger: Bool,
+        profiles: [Profile]
+    ) {
+        
+        if let match = matchResult {
+            // Apply the best matching profile
+            applyMatchingProfile(
+                match: match,
+                currentActiveProfile: currentActiveProfile,
+                isManualTrigger: isManualTrigger
+            )
+        } else {
+            // No matches found - handle fallback
+            handleNoMatchesFallback(
+                currentActiveProfile: currentActiveProfile,
+                profiles: profiles
+            )
+        }
+    }
+    
+    private func applyMatchingProfile(
+        match: MatchResult,
+        currentActiveProfile: Profile?,
+        isManualTrigger: Bool
+    ) {
+        // For manual triggers (like profile saves), always re-apply even if same profile
+        // because profile settings (like preferred mode) may have changed
+        if currentActiveProfile?.id == match.profile.id && !isManualTrigger {
+            // Profile already active, no change needed
+        } else {
+            if currentActiveProfile?.id == match.profile.id {
+                AppLogger.info("Re-applying profile '\(match.profile.name)' (manual trigger - settings may have changed)")
+            } else {
+                AppLogger.info("Auto-detected profile: '\(match.profile.name)' (matched \(match.matchCount) trigger device(s), primary: \(match.primaryTriggerDevice))")
+                
+                // Show notification for triggered switch (only for new activations)
+                if !isManualTrigger {
+                    notificationService.notifyTriggeredSwitch(
+                        profileName: match.profile.name,
+                        triggerDevice: match.primaryTriggerDevice,
+                        matchCount: match.matchCount
+                    )
+                }
+            }
+            triggerSubject.send(match.profile.id)
+        }
+    }
+    
+    private func handleNoMatchesFallback(
+        currentActiveProfile: Profile?,
+        profiles: [Profile]
+    ) {
+        // Always fall back to System Default profile when no triggers match
+        // This provides predictable, clear behavior
+        if let systemDefaultProfile = profiles.first(where: { $0.name == "System Default" }) {
+            if currentActiveProfile?.id != systemDefaultProfile.id {
+                AppLogger.info("No triggers matched - falling back to System Default profile")
+                
+                // Show notification for fallback
+                // Try to determine what device was lost by checking what the current profile was triggered by
+                let lostDevice = currentActiveProfile?.triggerDeviceIDs.first.flatMap { deviceID in
+                    deviceHistoryService.getDevice(by: deviceID)?.name
+                }
+                
+                notificationService.notifyFallbackSwitch(
+                    profileName: systemDefaultProfile.name,
+                    lostTriggerDevice: lostDevice
+                )
+                
+                triggerSubject.send(systemDefaultProfile.id)
+            }
+        } else {
+            AppLogger.warning("⚠️ No System Default profile found to fall back to")
+        }
+    }
+    
+    // MARK: - Main Evaluation Logic
+    
     private func evaluateTriggers(devices: [AudioDevice], isManualTrigger: Bool) {
         // Skip automatic triggers if intentionally disabled
         if !isManualTrigger {
@@ -169,12 +267,11 @@ class ProfileTriggerDetector {
         }
         
         // 3. Apply the best matching profile or handle fallback
-        activationCoordinator.applyProfileOrFallback(
+        applyProfileOrFallback(
             matchResult: matchResult,
             currentActiveProfile: currentActiveProfile,
             isManualTrigger: isManualTrigger,
-            profiles: profiles,
-            triggerSubject: triggerSubject
+            profiles: profiles
         )
     }
-}
+} 
