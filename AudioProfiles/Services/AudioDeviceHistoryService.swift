@@ -11,9 +11,6 @@ class AudioDeviceHistoryService: ObservableObject {
     // 30 days in seconds
     private let deviceExpirationInterval: TimeInterval = 30 * 24 * 60 * 60
     
-    // Service dependency
-    private let updateService = DeviceHistoryUpdateService()
-    
     private init() {
         loadDeviceHistory()
         pruneDeviceHistory()
@@ -22,8 +19,8 @@ class AudioDeviceHistoryService: ObservableObject {
     /// Update device history with current devices
     /// - Parameter devices: Currently active devices
     func updateDeviceHistory(with devices: [AudioDevice]) {
-        // Use specialized service to perform the complex update logic
-        deviceHistory = updateService.performCompleteUpdate(deviceHistory, with: devices)
+        // Perform the complete update logic directly
+        deviceHistory = performCompleteUpdate(deviceHistory, with: devices)
         
         // Clean up expired devices
         pruneDeviceHistory()
@@ -129,6 +126,100 @@ class AudioDeviceHistoryService: ObservableObject {
     }
     
     // MARK: - Private Methods
+    
+    /// Update existing device entries to mark inactive devices
+    /// - Parameters:
+    ///   - deviceHistory: Current device history to update
+    ///   - currentDeviceIDs: Set of currently active device IDs
+    ///   - timestamp: Current timestamp to use for updates
+    /// - Returns: Updated device history with status changes
+    private func updateExistingEntries(
+        _ deviceHistory: [String: DeviceHistoryEntry],
+        currentDeviceIDs: Set<String>,
+        timestamp: Date
+    ) -> [String: DeviceHistoryEntry] {
+        
+        var updatedHistory = deviceHistory
+        
+        // Update existing entries - mark as inactive if not currently present
+        for (deviceID, entry) in deviceHistory {
+            let isCurrentlyActive = currentDeviceIDs.contains(deviceID)
+            updatedHistory[deviceID] = DeviceHistoryEntry(
+                device: entry.device,
+                lastSeen: isCurrentlyActive ? timestamp : entry.lastSeen,
+                isCurrentlyActive: isCurrentlyActive
+            )
+        }
+        
+        return updatedHistory
+    }
+    
+    /// Add new devices to history or update existing ones with current data
+    /// - Parameters:
+    ///   - deviceHistory: Current device history to update
+    ///   - devices: Currently active devices to add/update
+    ///   - timestamp: Current timestamp to use for new entries
+    /// - Returns: Updated device history with new/updated devices
+    private func addOrUpdateDevices(
+        _ deviceHistory: [String: DeviceHistoryEntry],
+        devices: [AudioDevice],
+        timestamp: Date
+    ) -> [String: DeviceHistoryEntry] {
+        
+        var updatedHistory = deviceHistory
+        
+        // Add new devices to history
+        for device in devices {
+            if updatedHistory[device.id] == nil {
+                // Completely new device
+                updatedHistory[device.id] = DeviceHistoryEntry(
+                    device: device,
+                    lastSeen: timestamp,
+                    isCurrentlyActive: true
+                )
+            } else {
+                // Update existing device to ensure it's marked as active and has latest device info
+                updatedHistory[device.id] = DeviceHistoryEntry(
+                    device: device, // Use the current device data (might have updated properties)
+                    lastSeen: timestamp,
+                    isCurrentlyActive: true
+                )
+            }
+        }
+        
+        return updatedHistory
+    }
+    
+    /// Complete update process for device history
+    /// - Parameters:
+    ///   - deviceHistory: Current device history
+    ///   - devices: Currently active devices
+    ///   - timestamp: Current timestamp
+    /// - Returns: Fully updated device history
+    private func performCompleteUpdate(
+        _ deviceHistory: [String: DeviceHistoryEntry],
+        with devices: [AudioDevice],
+        timestamp: Date = Date()
+    ) -> [String: DeviceHistoryEntry] {
+        
+        let currentDeviceIDs = Set(devices.map { $0.id })
+        
+        // Step 1: Update existing entries
+        let historyWithUpdatedStatus = updateExistingEntries(
+            deviceHistory,
+            currentDeviceIDs: currentDeviceIDs,
+            timestamp: timestamp
+        )
+        
+        // Step 2: Add or update devices
+        let finalHistory = addOrUpdateDevices(
+            historyWithUpdatedStatus,
+            devices: devices,
+            timestamp: timestamp
+        )
+        
+        return finalHistory
+    }
     
     private func loadDeviceHistory() {
         guard let data = UserDefaults.standard.data(forKey: "AudioDeviceHistory"),

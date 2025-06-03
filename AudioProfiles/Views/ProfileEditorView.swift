@@ -209,7 +209,7 @@ struct GeneralSettingsSection: View {
                 }
                 
                 // Preferred Mode Selection - Clean and Simple
-                HStack {
+            HStack {
                     Text("Mode:")
                         .frame(width: 80, alignment: .leading)
                     
@@ -221,7 +221,7 @@ struct GeneralSettingsSection: View {
                     .labelsHidden()
                     .frame(maxWidth: 150)
                     
-                    Spacer()
+                Spacer()
                 }
                 
                 // Hotkey Configuration
