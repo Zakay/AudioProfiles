@@ -4,7 +4,15 @@ import Combine
 /// Coordinates profile activation decisions - applies best matching profile or falls back to default
 class ProfileActivationCoordinator {
     
-    private let notificationService = ProfileSwitchNotificationService.shared
+    private let notificationService: ProfileSwitchNotificationService
+    private let deviceHistoryService: AudioDeviceHistoryService
+    
+    /// Initialize with dependencies (defaults to singletons for backward compatibility)
+    init(notificationService: ProfileSwitchNotificationService = ProfileSwitchNotificationService.shared,
+         deviceHistoryService: AudioDeviceHistoryService = AudioDeviceHistoryService.shared) {
+        self.notificationService = notificationService
+        self.deviceHistoryService = deviceHistoryService
+    }
     
     /// Apply the best matching profile or handle fallback scenarios
     /// - Parameters:
@@ -82,7 +90,7 @@ class ProfileActivationCoordinator {
                 // Show notification for fallback
                 // Try to determine what device was lost by checking what the current profile was triggered by
                 let lostDevice = currentActiveProfile?.triggerDeviceIDs.first.flatMap { deviceID in
-                    AudioDeviceHistoryService.shared.getDevice(by: deviceID)?.name
+                    deviceHistoryService.getDevice(by: deviceID)?.name
                 }
                 
                 notificationService.notifyFallbackSwitch(
