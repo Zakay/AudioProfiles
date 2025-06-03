@@ -6,9 +6,17 @@ class ProfileTriggerDetector {
     let triggerSubject = PassthroughSubject<UUID, Never>()
     private var lastEvaluatedDevices: Set<String> = []
     
+    // MARK: - Analysis Result
+    
+    /// Result of device change analysis
+    private struct AnalysisResult {
+        let currentDeviceIDs: Set<String>
+        let shouldProceed: Bool
+        let reason: String
+    }
+    
     // Service dependencies - dependency injection for clean architecture
     private let deviceMonitor: AudioDeviceMonitor
-    private let deviceAnalyzer = DeviceChangeAnalyzer()
     private let triggerMatcher = TriggerMatchingService()
     private let activationCoordinator = ProfileActivationCoordinator()
     
@@ -46,6 +54,41 @@ class ProfileTriggerDetector {
         evaluateTriggers(devices: currentDevices, isManualTrigger: true)
     }
     
+    /// Analyze device changes and determine if trigger evaluation should proceed
+    /// - Parameters:
+    ///   - devices: Currently connected devices
+    ///   - lastEvaluatedDevices: Previously evaluated device IDs
+    ///   - isManualTrigger: Whether this is a manual trigger (always proceeds)
+    /// - Returns: Analysis result with recommendation
+    private func analyzeDeviceChanges(
+        devices: [AudioDevice],
+        lastEvaluatedDevices: Set<String>,
+        isManualTrigger: Bool
+    ) -> AnalysisResult {
+        
+        // Update device history with current devices first
+        AudioDeviceHistoryService.shared.updateDeviceHistory(with: devices)
+        
+        let currentDeviceIDs = Set(devices.map { $0.id })
+        
+        // Check if device list actually changed to avoid unnecessary processing
+        // Skip this check for manual triggers - user wants to force re-evaluation
+        if !isManualTrigger && currentDeviceIDs == lastEvaluatedDevices {
+            return AnalysisResult(
+                currentDeviceIDs: currentDeviceIDs,
+                shouldProceed: false,
+                reason: "Device list unchanged"
+            )
+        }
+        
+        let reason = isManualTrigger ? "Manual trigger requested" : "Device list changed"
+        return AnalysisResult(
+            currentDeviceIDs: currentDeviceIDs,
+            shouldProceed: true,
+            reason: reason
+        )
+    }
+    
     private func evaluateTriggers(devices: [AudioDevice], isManualTrigger: Bool) {
         // Skip automatic triggers if intentionally disabled
         if !isManualTrigger {
@@ -57,7 +100,7 @@ class ProfileTriggerDetector {
         }
         
         // 1. Analyze device changes and determine if we should proceed
-        let analysisResult = deviceAnalyzer.analyzeDeviceChanges(
+        let analysisResult = analyzeDeviceChanges(
             devices: devices,
             lastEvaluatedDevices: lastEvaluatedDevices,
             isManualTrigger: isManualTrigger
@@ -73,9 +116,6 @@ class ProfileTriggerDetector {
         // Get current state
         let profiles = ProfileManager.shared.profiles
         let currentActiveProfile = ProfileManager.shared.activeProfile
-        
-        // Log analysis summary
-        deviceAnalyzer.logAnalysisSummary(profiles: profiles, currentActiveProfile: currentActiveProfile)
         
         // 2. Find the best matching profile based on trigger devices
         let matchResult = triggerMatcher.findBestMatch(
