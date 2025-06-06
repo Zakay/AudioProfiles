@@ -3,20 +3,29 @@ import Foundation
 /// Handles profile validation and cleanup operations
 class ProfileValidationService {
     
-    private let deviceService = ProfileDeviceService()
+    private let deviceFilterService = DeviceFilterService()
     
     /// Clean up invalid device references from a single profile
     /// - Parameter profile: Profile to clean up
     /// - Returns: Cleaned profile
     func cleanupInvalidDevices(in profile: Profile) -> Profile {
-        return deviceService.cleanupInvalidDevices(in: profile)
+        var updatedProfile = profile
+        
+        // Filter out invalid device IDs from all lists
+        updatedProfile.triggerDeviceIDs = profile.triggerDeviceIDs.filter { deviceFilterService.isDeviceConnected($0) }
+        updatedProfile.publicOutputPriority = profile.publicOutputPriority.filter { deviceFilterService.isDeviceConnected($0) }
+        updatedProfile.publicInputPriority = profile.publicInputPriority.filter { deviceFilterService.isDeviceConnected($0) }
+        updatedProfile.privateOutputPriority = profile.privateOutputPriority.filter { deviceFilterService.isDeviceConnected($0) }
+        updatedProfile.privateInputPriority = profile.privateInputPriority.filter { deviceFilterService.isDeviceConnected($0) }
+        
+        return updatedProfile
     }
     
     /// Clean up invalid device references from an array of profiles
     /// - Parameter profiles: Array of profiles to clean up
     /// - Returns: Array of cleaned profiles
     func cleanupInvalidDevices(in profiles: [Profile]) -> [Profile] {
-        return profiles.map { deviceService.cleanupInvalidDevices(in: $0) }
+        return profiles.map { cleanupInvalidDevices(in: $0) }
     }
     
     /// Check if two profile arrays are equal (comparing device references)

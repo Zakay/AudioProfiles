@@ -25,7 +25,7 @@ class ProfileManager: ObservableObject {
     
     // Core services for real specialized responsibilities
     private let activationService = ProfileActivationService()
-    private let deviceService = ProfileDeviceService()
+    private let deviceFilterService = DeviceFilterService()
     private let persistenceService = ProfilePersistenceService()
     private let validationService = ProfileValidationService()
     private let notificationService = ProfileSwitchNotificationService.shared
