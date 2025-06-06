@@ -2,6 +2,11 @@ import Foundation
 import UserNotifications
 
 /// Service for showing user notifications
+///
+/// **Responsibility**: Manages all user-facing notifications for the application
+/// **Architecture Role**: Service
+/// **Usage**: Instantiated by other services; not a singleton
+/// **Key Dependencies**: UserNotifications
 class NotificationService {
     
     init() {

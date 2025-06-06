@@ -19,7 +19,12 @@ enum AutoSwitchingDisableDuration {
     }
 }
 
-/// Coordinating service that orchestrates profile operations 
+/// Central coordinating service that orchestrates all profile operations
+///
+/// **Responsibility**: Acts as a Facade for the profile system, providing a single entry point for UI and other services
+/// **Architecture Role**: Service Facade & Coordinator
+/// **Usage Pattern**: Singleton (`.shared`)
+/// **Key Dependencies**: ProfileActivationService, DeviceFilterService, ProfilePersistenceService, ProfileValidationService, NotificationService
 class ProfileManager: ObservableObject {
     static let shared = ProfileManager()
     

@@ -4,7 +4,7 @@ import Combine
 /// Handles device-based profile triggering - detects device changes and coordinates profile switching
 /// 
 /// **Responsibility**: Complete device trigger workflow from detection to profile application
-/// **Architecture Role**: Service  
+/// **Architecture Role**: Service & Coordinator
 /// **Usage**: Public API via shared singleton
 /// **Dependencies**: AudioDeviceMonitor, ProfileManager, AudioDeviceHistoryService, NotificationService
 class ProfileTriggerService {

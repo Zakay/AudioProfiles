@@ -1,7 +1,12 @@
 import Foundation
 import Combine
 
-/// Handles profile activation and mode switching
+/// Handles the direct application of profile settings to the system
+///
+/// **Responsibility**: Sets default system audio devices based on profile priorities and mode
+/// **Architecture Role**: Service (Low-Level System Interaction)
+/// **Usage**: Instantiated by ProfileManager; not a singleton
+/// **Key Dependencies**: AudioDeviceControlService
 class ProfileActivationService: ObservableObject {
     @Published private(set) var activeProfile: Profile?
     @Published private(set) var activeMode: ProfileMode = .public

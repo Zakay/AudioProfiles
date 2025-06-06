@@ -1,6 +1,11 @@
 import Foundation
 
 /// Centralizes device filtering and querying logic to eliminate duplication across views
+///
+/// **Responsibility**: Provides simplified, high-level methods for querying audio devices
+/// **Architecture Role**: Service (Querying & Filtering)
+/// **Usage**: Instantiated by other services; not a singleton
+/// **Key Dependencies**: AudioDeviceHistoryService, AudioDeviceFactory
 class DeviceFilterService {
     
     // MARK: - Dependencies
