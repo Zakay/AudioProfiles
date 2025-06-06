@@ -66,6 +66,13 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 <img width="796" alt="image" src="https://github.com/user-attachments/assets/67902de6-ccfb-4161-b37f-ce29091c6e16" />
 <img width="296" alt="image" src="https://github.com/user-attachments/assets/dd20863a-f57c-4b1c-a06a-002f56b25746" />
 
+## My AI Vibe Coding Experiments
+
+This is one of several projects I've built using this AI-driven development process. Check out the others:
+
+- [**NoDoze**](https://github.com/Zakay/NoDoze): MacOS menu bar app that intelligently prevents sleep, with a mode that automatically disables when displays are off.
+- *(More to come!)*
+  
 ---
 
 *If AudioProfiles saves you time and frustration with audio device switching, consider giving it a ⭐ on GitHub!* 
