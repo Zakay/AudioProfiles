@@ -32,7 +32,7 @@ class ProfileTriggerService {
     
     // Service dependencies
     private let deviceMonitor: AudioDeviceMonitor
-    private let notificationService = ProfileSwitchNotificationService.shared
+    private let notificationService = NotificationService()
     private let deviceHistoryService = AudioDeviceHistoryService.shared
     
     private var cancellables = Set<AnyCancellable>()

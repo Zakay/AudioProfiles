@@ -28,7 +28,7 @@ class ProfileManager: ObservableObject {
     private let deviceFilterService = DeviceFilterService()
     private let persistenceService = ProfilePersistenceService()
     private let validationService = ProfileValidationService()
-    private let notificationService = ProfileSwitchNotificationService.shared
+    private let notificationService = NotificationService()
     
     private var cancellables = Set<AnyCancellable>()
     

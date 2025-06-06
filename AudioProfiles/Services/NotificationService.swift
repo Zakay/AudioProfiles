@@ -1,11 +1,10 @@
 import Foundation
 import UserNotifications
 
-/// Service for showing notifications when profiles switch
-class ProfileSwitchNotificationService {
-    static let shared = ProfileSwitchNotificationService()
+/// Service for showing user notifications
+class NotificationService {
     
-    private init() {
+    init() {
         requestNotificationPermission()
     }
     
