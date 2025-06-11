@@ -34,6 +34,7 @@ class ProfileTriggerService {
     private let deviceMonitor: AudioDeviceMonitor
     private let notificationService = NotificationService()
     private let deviceHistoryService = AudioDeviceHistoryService.shared
+    private let deviceFilterService = DeviceFilterService()
     
     private var cancellables = Set<AnyCancellable>()
 
@@ -273,5 +274,10 @@ class ProfileTriggerService {
             isManualTrigger: isManualTrigger,
             profiles: profiles
         )
+    }
+    
+    func isDeviceKnown(_ id: String) -> Bool {
+        deviceFilterService.isDeviceConnected(id) ||
+        deviceFilterService.getDevice(by: id) != nil   // seen in history
     }
 } 

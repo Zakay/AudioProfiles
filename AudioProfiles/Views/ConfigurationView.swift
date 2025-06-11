@@ -108,27 +108,11 @@ struct ConfigurationView: View {
                                 // Device configuration row with icons
                                 HStack(spacing: 16) {
                                     // Output device info
-                                    HStack(spacing: 4) {
-                                        Image(systemName: "speaker.wave.2")
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                        
-                                        Text(deviceDisplayText(for: profile, isOutput: true))
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                    }
-                                    
+                                    deviceInfoView(profile: profile, isOutput: true)
+
                                     // Input device info
-                                    HStack(spacing: 4) {
-                                        Image(systemName: "mic")
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                        
-                                        Text(deviceDisplayText(for: profile, isOutput: false))
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                    }
-                                    
+                                    deviceInfoView(profile: profile, isOutput: false)
+
                                     Spacer()
                                 }
                             }
@@ -273,26 +257,78 @@ struct ConfigurationView: View {
         }
     }
     
-    /// Get device name for display without prefix (since icons provide the context)
-    private func deviceDisplayText(for profile: Profile, isOutput: Bool) -> String {
-        let deviceHistoryService = AudioDeviceHistoryService.shared
-        
-        if isOutput {
-            let validDeviceId: String? = profile.publicOutputPriority.first { !$0.isEmpty && deviceHistoryService.getDevice(by: $0) != nil } 
-                             ?? profile.privateOutputPriority.first { !$0.isEmpty && deviceHistoryService.getDevice(by: $0) != nil }
-            
-            if let id = validDeviceId, let device = deviceHistoryService.getDevice(by: id) {
-                return device.name
+    // MARK: - Device info helpers with coloured icons
+
+    /// Resolve highest-priority device names for public and private modes.
+    private func topDeviceNames(profile: Profile, isOutput: Bool) -> (publicName: String?, privateName: String?) {
+        let history = AudioDeviceHistoryService.shared
+
+        func firstName(in ids: [String]) -> String? {
+            for id in ids {
+                if let name = history.getDevice(by: id)?.name {
+                    return name
+                }
             }
-            return "Default"
+            return nil
+        }
+
+        let pubIDs  = isOutput ? profile.publicOutputPriority  : profile.publicInputPriority
+        let privIDs = isOutput ? profile.privateOutputPriority : profile.privateInputPriority
+
+        return (firstName(in: pubIDs), firstName(in: privIDs))
+    }
+
+    /// Compact display that colors the icon blue (public) or purple (private) when the two modes differ.
+    /// If both modes share the same device (or only one is set) we show a single gray icon row.
+    @ViewBuilder
+    private func deviceInfoView(profile: Profile, isOutput: Bool) -> some View {
+        let symbolName = isOutput ? "speaker.wave.2" : "mic"
+        let (publicName, privateName) = topDeviceNames(profile: profile, isOutput: isOutput)
+
+        if publicName == nil && privateName == nil {
+            // No priorities – show default
+            HStack(spacing: 4) {
+                Image(systemName: symbolName)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Text("Default")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        } else if publicName == privateName {
+            // Same device (or only one specified) – single row, neutral icon
+            HStack(spacing: 4) {
+                Image(systemName: symbolName)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Text(publicName ?? privateName!)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
         } else {
-            let validDeviceId: String? = profile.publicInputPriority.first { !$0.isEmpty && deviceHistoryService.getDevice(by: $0) != nil } 
-                             ?? profile.privateInputPriority.first { !$0.isEmpty && deviceHistoryService.getDevice(by: $0) != nil }
-            
-            if let id = validDeviceId, let device = deviceHistoryService.getDevice(by: id) {
-                return device.name
+            // Different devices – show two rows with coloured icons
+            VStack(alignment: .leading, spacing: 2) {
+                if let pub = publicName {
+                    HStack(spacing: 4) {
+                        Image(systemName: symbolName)
+                            .font(.caption)
+                            .foregroundColor(.blue)
+                        Text(pub)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                if let priv = privateName {
+                    HStack(spacing: 4) {
+                        Image(systemName: symbolName)
+                            .font(.caption)
+                            .foregroundColor(.purple)
+                        Text(priv)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
             }
-            return "Default"
         }
     }
 } 

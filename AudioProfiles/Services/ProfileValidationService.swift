@@ -11,12 +11,18 @@ class ProfileValidationService {
     func cleanupInvalidDevices(in profile: Profile) -> Profile {
         var updatedProfile = profile
         
-        // Filter out invalid device IDs from all lists
-        updatedProfile.triggerDeviceIDs = profile.triggerDeviceIDs.filter { deviceFilterService.isDeviceConnected($0) }
-        updatedProfile.publicOutputPriority = profile.publicOutputPriority.filter { deviceFilterService.isDeviceConnected($0) }
-        updatedProfile.publicInputPriority = profile.publicInputPriority.filter { deviceFilterService.isDeviceConnected($0) }
-        updatedProfile.privateOutputPriority = profile.privateOutputPriority.filter { deviceFilterService.isDeviceConnected($0) }
-        updatedProfile.privateInputPriority = profile.privateInputPriority.filter { deviceFilterService.isDeviceConnected($0) }
+        // Only remove a device reference if the device is completely unknown (not currently connected *and* not present in device history).
+        // This allows profiles to safely reference temporarily disconnected devices without losing their configuration.
+        func isDeviceKnown(_ deviceID: String) -> Bool {
+            // Device is known if it is currently connected OR exists in history
+            return deviceFilterService.isDeviceConnected(deviceID) || deviceFilterService.getDevice(by: deviceID) != nil
+        }
+
+        updatedProfile.triggerDeviceIDs = profile.triggerDeviceIDs.filter { isDeviceKnown($0) }
+        updatedProfile.publicOutputPriority = profile.publicOutputPriority.filter { isDeviceKnown($0) }
+        updatedProfile.publicInputPriority = profile.publicInputPriority.filter { isDeviceKnown($0) }
+        updatedProfile.privateOutputPriority = profile.privateOutputPriority.filter { isDeviceKnown($0) }
+        updatedProfile.privateInputPriority = profile.privateInputPriority.filter { isDeviceKnown($0) }
         
         return updatedProfile
     }
