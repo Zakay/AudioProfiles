@@ -9,6 +9,7 @@ final class StatusItemManager: NSObject, ObservableObject, NSPopoverDelegate {
     private var statusBarViewModel = StatusBarViewModel()
     private var localEventMonitor: Any?
     private var globalEventMonitor: Any?
+    private var isPopoverPresented = false
     
     func setupStatusItem() {
         // Create the status item
@@ -37,19 +38,24 @@ final class StatusItemManager: NSObject, ObservableObject, NSPopoverDelegate {
     }
     
     private func toggleMenu() {
-        if let popover = menuPopover, popover.isShown {
-            popover.close()
-            menuPopover = nil
+        if isPopoverPresented {
+            closeMenu()
         } else {
             showMenu()
         }
     }
     
-    private func showMenu() {
-        // Close any existing popovers first
-        if let existingPopover = menuPopover, existingPopover.isShown {
-            existingPopover.close()
+    private func closeMenu() {
+        guard let popover = menuPopover else {
+            isPopoverPresented = false
+            return
         }
+        
+        popover.close()
+    }
+    
+    private func showMenu() {
+        guard !isPopoverPresented else { return }
         
         // Create popover
         let popover = NSPopover()
@@ -60,17 +66,20 @@ final class StatusItemManager: NSObject, ObservableObject, NSPopoverDelegate {
         // Set the SwiftUI content
         let menuView = ProfileMenuView(viewModel: statusBarViewModel)
         popover.contentViewController = NSHostingController(rootView: menuView)
+        popover.delegate = self
+        
+        menuPopover = popover
+        isPopoverPresented = true
         
         // Show the popover
         if let button = statusItem?.button {
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            setupClickDetection()
+        } else {
+            // If we cannot present the popover, reset our state
+            isPopoverPresented = false
+            menuPopover = nil
         }
-        
-        menuPopover = popover
-        popover.delegate = self
-        
-        // Set up click detection for auto-close
-        setupClickDetection()
     }
     
     private func setupClickDetection() {
@@ -143,6 +152,7 @@ final class StatusItemManager: NSObject, ObservableObject, NSPopoverDelegate {
         menuPopover = nil
         statusItem = nil
         hostingView = nil
+        isPopoverPresented = false
         
         // Clean up event monitors
         if let monitor = localEventMonitor {
@@ -162,6 +172,7 @@ final class StatusItemManager: NSObject, ObservableObject, NSPopoverDelegate {
     
     func popoverDidClose(_ notification: Notification) {
         menuPopover = nil
+        isPopoverPresented = false
         
         // Clean up event monitors
         if let monitor = localEventMonitor {
