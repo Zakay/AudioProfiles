@@ -301,6 +301,12 @@ class ProfileManager: ObservableObject {
             oldHotkey: oldProfile?.hotkey, 
             newHotkey: profile.hotkey
         )
+
+        // Refresh the active profile if we just edited it.
+        if activationService.activeProfile?.id == profile.id {
+            let preserveMode = oldProfile?.preferredMode == profile.preferredMode
+            activationService.refreshActiveProfile(with: profile, preserveMode: preserveMode)
+        }
         
         // Auto-trigger detection after configuration changes
         if triggerAutoDetection {

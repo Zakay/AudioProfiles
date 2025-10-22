@@ -38,6 +38,22 @@ class ProfileActivationService: ObservableObject {
         }
         AppLogger.info("Switched to \(activeMode.rawValue) mode")
     }
+
+    /// Refresh the currently active profile when its configuration changes.
+    /// - Parameters:
+    ///   - profile: Updated profile definition.
+    ///   - preserveMode: Whether to keep the current mode instead of forcing the preferred mode.
+    func refreshActiveProfile(with profile: Profile, preserveMode: Bool = true) {
+        let targetMode = preserveMode ? activeMode : profile.preferredMode
+
+        if activeMode != targetMode {
+            activeMode = targetMode
+        }
+
+        activeProfile = profile
+        applyProfile(profile)
+        AppLogger.info("Refreshed active profile: \(profile.name) (preserveMode: \(preserveMode))")
+    }
     
     private func applyProfile(_ profile: Profile) {
         // Get current devices directly from factory
