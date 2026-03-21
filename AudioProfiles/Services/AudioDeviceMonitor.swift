@@ -31,6 +31,13 @@ class AudioDeviceMonitor: ObservableObject {
 
     private var lastKnownDeviceIDs: Set<String> = []
 
+    /// Debounce work item — coalesces rapid device notifications into one query.
+    private var debounceWork: DispatchWorkItem?
+    /// How long to wait after the last notification before querying Core Audio.
+    private let debounceInterval: TimeInterval = 0.5
+    /// True while coreaudiod is restarting — suppresses device queries until stable.
+    private var isRestarting = false
+
     private init() {
         setupServiceRestartMonitoring()
         setupDeviceMonitoring()
@@ -49,7 +56,7 @@ class AudioDeviceMonitor: ObservableObject {
             &propertyAddress,
             audioQueue
         ) { [weak self] _, _ in
-            self?.handleDeviceListChange()
+            self?.scheduleDeviceQuery()
         }
     }
 
@@ -60,12 +67,38 @@ class AudioDeviceMonitor: ObservableObject {
             &restartAddress,
             audioQueue
         ) { [weak self] _, _ in
-            AppLogger.info("coreaudiod service restarted — notifying subscribers")
-            self?.lastKnownDeviceIDs = []
+            guard let self = self else { return }
+            AppLogger.info("coreaudiod service restarted — suppressing queries for stabilization")
+            self.isRestarting = true
+            self.debounceWork?.cancel()
+            self.lastKnownDeviceIDs = []
+
             DispatchQueue.main.async {
-                self?.serviceRestartedSubject.send()
+                self.serviceRestartedSubject.send()
             }
+
+            // After coreaudiod restart, wait for the system to stabilize before querying.
+            // Devices register one by one; querying too early gets partial/hanging results.
+            let stabilizeWork = DispatchWorkItem { [weak self] in
+                guard let self = self else { return }
+                self.isRestarting = false
+                AppLogger.info("coreaudiod stabilization period ended — querying devices")
+                self.handleDeviceListChange()
+            }
+            self.audioQueue.asyncAfter(deadline: .now() + 2.0, execute: stabilizeWork)
         }
+    }
+
+    /// Debounce rapid device notifications into a single query.
+    private func scheduleDeviceQuery() {
+        debounceWork?.cancel()
+        // During restart, don't schedule — the stabilization timer handles it.
+        guard !isRestarting else { return }
+        let work = DispatchWorkItem { [weak self] in
+            self?.handleDeviceListChange()
+        }
+        debounceWork = work
+        audioQueue.asyncAfter(deadline: .now() + debounceInterval, execute: work)
     }
 
     private func handleDeviceListChange() {

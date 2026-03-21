@@ -8,14 +8,9 @@ struct EQTabView: View {
     @ObservedObject private var installService = EQInstallationService.shared
     @State private var selectedDeviceID: String? = nil
     @State private var showingInstallSheet = false
-
-    // MARK: - Device lists
-
-    private var outputDevices: [AudioDevice] {
-        AudioDeviceFactory.getCurrentDevices()
-            .filter(\.isOutput)
-            .sorted { $0.name < $1.name }
-    }
+    /// Cached device list — never query Core Audio synchronously on the main thread.
+    /// Updated from AudioDeviceMonitor (which queries on a background queue).
+    @State private var outputDevices: [AudioDevice] = []
 
     private var selectedDevice: AudioDevice? {
         outputDevices.first { $0.id == selectedDeviceID }
@@ -43,13 +38,20 @@ struct EQTabView: View {
                 noDriverState
             }
 
-            Spacer(minLength: 0)
         }
         .padding(.horizontal)
         .padding(.bottom)
         .padding(.top, 8)
-        .onAppear { autoSelectDevice() }
-        .onChange(of: outputDevices.map(\.id)) { autoSelectDevice() }
+        .onAppear { refreshDevices() }
+        .onReceive(AudioDeviceMonitor.shared.deviceChangesSubject) { devices in
+            outputDevices = devices.filter(\.isOutput).sorted { $0.name < $1.name }
+            autoSelectDevice()
+        }
+        .onReceive(AudioDeviceMonitor.shared.serviceRestartedSubject) {
+            // coreaudiod restarted — clear stale device list, wait for fresh device notification
+            outputDevices = []
+            selectedDeviceID = nil
+        }
         .sheet(isPresented: $showingInstallSheet) {
             EQDriverInstallSheet(isPresented: $showingInstallSheet)
         }
@@ -105,9 +107,24 @@ struct EQTabView: View {
         }
     }
 
-    // MARK: - Auto-select
+    // MARK: - Device management
 
+    /// Initial load — runs on a background queue to avoid blocking main thread.
+    private func refreshDevices() {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let devices = AudioDeviceFactory.getCurrentDevices()
+                .filter(\.isOutput)
+                .sorted { $0.name < $1.name }
+            DispatchQueue.main.async {
+                outputDevices = devices
+                autoSelectDevice()
+            }
+        }
+    }
+
+    /// Pick the best device without calling Core Audio on the main thread.
     private func autoSelectDevice() {
+        guard !outputDevices.isEmpty else { return }
         // If current selection is still valid, keep it
         if let id = selectedDeviceID, outputDevices.contains(where: { $0.id == id }) {
             return
@@ -120,13 +137,8 @@ struct EQTabView: View {
             selectedDeviceID = targetUID
             return
         }
-        // Otherwise pick the current default output, or first available
-        let defaultDevice = AudioDeviceControlService().getDefaultOutputDevice()
-        if let def = defaultDevice, outputDevices.contains(where: { $0.id == def.id }) {
-            selectedDeviceID = def.id
-        } else {
-            selectedDeviceID = outputDevices.first?.id
-        }
+        // Fall back to first available device (avoids synchronous Core Audio call)
+        selectedDeviceID = outputDevices.first?.id
     }
 
     // MARK: - Banners

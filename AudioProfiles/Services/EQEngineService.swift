@@ -242,18 +242,22 @@ final class EQEngineService: ObservableObject {
     func stopSafe(switchTo realDeviceUID: String) {
         AppLogger.info("EQEngineService: stopping, switching back to \(realDeviceUID)")
 
-        let devices = AudioDeviceFactory.getCurrentDevices()
-        if let realDevice = devices.first(where: { $0.id == realDeviceUID && $0.isOutput }) {
-            let controlService = AudioDeviceControlService()
-            let ok = controlService.setDefaultOutputDevice(realDevice)
-            AppLogger.info("EQEngineService: restored default output to '\(realDevice.name)' → \(ok)")
-        }
-
         stopEngineOnly()
         EQDriverService.shared.hide()
 
         targetDeviceUID = nil
         isRunning = false
+
+        // Restore default output on a background queue — Core Audio calls can hang
+        // during coreaudiod restart if called on the main thread.
+        DispatchQueue.global(qos: .userInitiated).async {
+            let devices = AudioDeviceFactory.getCurrentDevices()
+            if let realDevice = devices.first(where: { $0.id == realDeviceUID && $0.isOutput }) {
+                let controlService = AudioDeviceControlService()
+                let ok = controlService.setDefaultOutputDevice(realDevice)
+                AppLogger.info("EQEngineService: restored default output to '\(realDevice.name)' → \(ok)")
+            }
+        }
     }
 
     func stopSafe() {

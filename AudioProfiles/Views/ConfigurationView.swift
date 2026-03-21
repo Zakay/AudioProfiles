@@ -20,7 +20,8 @@ struct ConfigurationView: View {
             EQTabView()
                 .tabItem { Label("EQ", systemImage: "slider.vertical.3") }
         }
-        .frame(width: 530, height: 560)
+        .frame(width: 530)
+        .fixedSize(horizontal: false, vertical: true)
         .sheet(isPresented: $showAddProfileSheet) {
             let newProfile = ProfileManager.shared.createNewProfileInstance()
             ProfileEditorView(vm: ProfileEditorViewModel(profile: newProfile))
@@ -210,10 +211,8 @@ struct ConfigurationView: View {
                 }
                 .listStyle(.plain)
                 .scrollContentBackground(.hidden)
-                .frame(maxHeight: 345)
+                .frame(height: min(CGFloat(profileManager.profiles.count) * 80, 400))
             }
-
-            Spacer(minLength: 0)
 
             // Settings Section
             VStack(spacing: 12) {
