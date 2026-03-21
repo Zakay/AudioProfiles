@@ -208,11 +208,11 @@ struct ProfileMenuView: View {
     }
     
     private var currentOutputDevice: String? {
-        AudioDeviceControlService().getDefaultOutputDevice()?.name
+        profileManager.activeOutputDeviceName
     }
-    
+
     private var currentInputDevice: String? {
-        AudioDeviceControlService().getDefaultInputDevice()?.name
+        profileManager.activeInputDeviceName
     }
     
     private func openAboutWindow() {

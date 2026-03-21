@@ -10,7 +10,9 @@ import Combine
 class ProfileActivationService: ObservableObject {
     @Published private(set) var activeProfile: Profile?
     @Published private(set) var activeMode: ProfileMode = .public
-    
+    @Published private(set) var activeOutputDeviceName: String?
+    @Published private(set) var activeInputDeviceName: String?
+
     // Direct service dependencies - no facade needed
     private let deviceControlService = AudioDeviceControlService()
     
@@ -58,31 +60,45 @@ class ProfileActivationService: ObservableObject {
     private func applyProfile(_ profile: Profile) {
         // Get current devices directly from factory
         let devices = AudioDeviceFactory.getCurrentDevices()
-        let outputList = (activeMode == .public) ? profile.publicOutputPriority : profile.privateOutputPriority
-        let inputList = (activeMode == .public) ? profile.publicInputPriority : profile.privateInputPriority
+        let outputList = profile.priorityList(isOutput: true, mode: activeMode)
+        let inputList = profile.priorityList(isOutput: false, mode: activeMode)
 
         // Apply output device using direct service call
+        var didSetOutput = false
         for deviceID in outputList {
             if let device = findDevice(by: deviceID, in: devices, isOutput: true) {
                 if deviceControlService.setDefaultOutputDevice(device) {
                     AppLogger.info("Set output device: \(device.name)")
+                    activeOutputDeviceName = device.name
+                    didSetOutput = true
                     break
                 } else {
                     AppLogger.error("Failed to set output device: \(device.name)")
                 }
             }
         }
-        
+
         // Apply input device using direct service call
+        var didSetInput = false
         for deviceID in inputList {
             if let device = findDevice(by: deviceID, in: devices, isInput: true) {
                 if deviceControlService.setDefaultInputDevice(device) {
                     AppLogger.info("Set input device: \(device.name)")
+                    activeInputDeviceName = device.name
+                    didSetInput = true
                     break
                 } else {
                     AppLogger.error("Failed to set input device: \(device.name)")
                 }
             }
+        }
+
+        // Fall back to current system defaults for display when profile has no priorities
+        if !didSetOutput {
+            activeOutputDeviceName = deviceControlService.getDefaultOutputDevice()?.name
+        }
+        if !didSetInput {
+            activeInputDeviceName = deviceControlService.getDefaultInputDevice()?.name
         }
     }
     

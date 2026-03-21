@@ -42,6 +42,8 @@ class ProfileManager: ObservableObject {
     @Published private(set) var profiles: [Profile] = []
     @Published private(set) var activeProfile: Profile?
     @Published private(set) var activeMode: ProfileMode = .public
+    @Published private(set) var activeOutputDeviceName: String?
+    @Published private(set) var activeInputDeviceName: String?
     @Published private(set) var isAutoSwitchingDisabled: Bool = false
     @Published private(set) var autoSwitchingDisabledUntil: Date?
     @Published private(set) var remainingDisableTime: String?
@@ -68,6 +70,14 @@ class ProfileManager: ObservableObject {
             
         activationService.$activeMode
             .assign(to: \.activeMode, on: self)
+            .store(in: &cancellables)
+
+        activationService.$activeOutputDeviceName
+            .assign(to: \.activeOutputDeviceName, on: self)
+            .store(in: &cancellables)
+
+        activationService.$activeInputDeviceName
+            .assign(to: \.activeInputDeviceName, on: self)
             .store(in: &cancellables)
     }
     

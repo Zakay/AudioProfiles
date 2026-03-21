@@ -55,4 +55,15 @@ struct Profile: Codable, Identifiable {
     var isSystemDefault: Bool {
         return name == "System Default"
     }
+
+    /// Single accessor for the device priority list given a direction and mode.
+    /// All code that needs "which priority list?" should go through this.
+    func priorityList(isOutput: Bool, mode: ProfileMode) -> [String] {
+        switch (isOutput, mode) {
+        case (true,  .public):  return publicOutputPriority
+        case (true,  .private): return privateOutputPriority
+        case (false, .public):  return publicInputPriority
+        case (false, .private): return privateInputPriority
+        }
+    }
 }

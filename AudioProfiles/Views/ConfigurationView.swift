@@ -272,8 +272,8 @@ struct ConfigurationView: View {
             return nil
         }
 
-        let pubIDs  = isOutput ? profile.publicOutputPriority  : profile.publicInputPriority
-        let privIDs = isOutput ? profile.privateOutputPriority : profile.privateInputPriority
+        let pubIDs  = profile.priorityList(isOutput: isOutput, mode: .public)
+        let privIDs = profile.priorityList(isOutput: isOutput, mode: .private)
 
         return (firstName(in: pubIDs), firstName(in: privIDs))
     }
