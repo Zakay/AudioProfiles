@@ -1,5 +1,4 @@
 import Foundation
-import AVFoundation
 import CoreAudio
 import AudioToolbox
 import Combine
@@ -9,15 +8,16 @@ import Combine
 /// The core audio processing pipeline using manual AUHAL units.
 ///
 /// Architecture:
-///   1. Input AUHAL: pinned to the virtual device, captures audio via input callback
-///      into a thread-safe CaptureBuffer.
+///   1. Shared memory: the driver writes audio via WriteMix into an mmap'd file.
+///      The app reads from this file directly — no Core Audio input API needed,
+///      so no TCC microphone permission is required.
 ///   2. Output AUHAL: pinned to the real hardware device, drives the render chain.
-///      Its render callback pulls from EQ AudioUnit, which reads from CaptureBuffer.
-///   3. N-band EQ AudioUnit: processes audio between capture and output.
+///      Its render callback pulls from EQ AudioUnit, which reads from shared memory.
+///   3. N-band EQ AudioUnit: processes audio between shared memory and output.
 ///
 /// Data flow:
-///   Apps → WriteMix (virtual device) → RingBuffer → ReadInput →
-///   Input AUHAL (capture callback) → CaptureBuffer →
+///   Apps → WriteMix (virtual device) → SharedAudioBuffer (in driver) →
+///   SharedAudioReader (mmap, no TCC) →
 ///   EQ render callback → NBandEQ → Output AUHAL render callback → Real hardware
 ///
 /// Threading: start/stop called on main thread; IO callbacks on real-time audio threads.
@@ -33,16 +33,14 @@ final class EQEngineService: ObservableObject {
 
     // MARK: - Private audio state
 
-    private var inputAU:  AudioUnit?
     private var eqAU:     AudioUnit?
     private var outputAU: AudioUnit?
 
-    /// Shared capture buffer between input AUHAL callback and EQ render callback
-    private var captureBuffer: CaptureBuffer?
+    /// Cross-process shared memory reader — reads audio from the driver without TCC
+    private var sharedReader: SharedAudioReader?
 
     /// Prevent reference objects from being deallocated while render callbacks use them
-    private var eqRenderRef:    EQRenderRef?
-    private var inputCaptureRef: InputCaptureRef?
+    private var eqRenderRef: EQRenderRef?
 
     /// Volume sync: mirrors virtual device volume to real device
     private var virtualDeviceID: AudioObjectID?
@@ -80,13 +78,11 @@ final class EQEngineService: ObservableObject {
                 guard let self = self, self.isRunning else { return }
                 AppLogger.info("EQEngineService: coreaudiod restarted — tearing down pipeline")
                 // gRenderStopped already set by the direct listener above
-                // no-op: diagTimer removed
                 // Don't call AudioOutputUnitStop/Dispose — AUs are dead
                 self.outputAU = nil
-                self.inputAU  = nil
                 self.eqAU     = nil
-                // Keep eqRenderRef, inputCaptureRef, captureBuffer alive —
-                // an IO thread may still be mid-callback with a pointer to them.
+                // Keep eqRenderRef alive —
+                // an IO thread may still be mid-callback with a pointer to it.
                 self.targetDeviceUID = nil
                 self.isRunning = false
                 EQDriverService.shared.hide()
@@ -140,48 +136,35 @@ final class EQEngineService: ObservableObject {
         Thread.sleep(forTimeInterval: 0.02)  // Brief pause for HAL to digest rate change
         let virtualRate = getDeviceSampleRate(virtualObjectID) ?? realRate
         let channels: UInt32 = 2
-        let inputFormat = makeInterleavedFormat(sampleRate: virtualRate, channels: channels)
         let eqFormat = makeNonInterleavedFormat(sampleRate: virtualRate, channels: channels)
         let outputFormat = makeNonInterleavedFormat(sampleRate: virtualRate, channels: channels)
         AppLogger.error("[EQ-DIAG] formats: virtualRate=\(virtualRate) ch=\(channels)")
 
         do {
-            // 5. Create capture buffer (interleaved capture → deinterleaved read)
-            let capBuf = CaptureBuffer(channels: Int(channels), maxFrames: 4096)
-            self.captureBuffer = capBuf
+            // 5. Open shared memory reader (reads from driver's mmap'd file — no TCC!)
+            guard let reader = SharedAudioReader() else {
+                throw AUError("Open shared memory reader", -1)
+            }
+            self.sharedReader = reader
 
-            // 6. Create audio units (input=interleaved, EQ+output=non-interleaved)
-            let input  = try createInputAUHAL(device: virtualObjectID, format: inputFormat)
+            // 6. Create audio units (EQ+output=non-interleaved)
             let eq     = try createEQUnit(settings: settings, format: eqFormat)
             let output = try createOutputAUHAL(device: realObjectID, format: outputFormat)
 
-            // 7. Set up input capture callback (fires when input AUHAL has data)
-            let inputCapRef = InputCaptureRef(unit: input, buffer: capBuf, generation: gen)
-            self.inputCaptureRef = inputCapRef
-
-            var inputCallbackStruct = AURenderCallbackStruct(
-                inputProc: inputCaptureCallback,
-                inputProcRefCon: Unmanaged.passUnretained(inputCapRef).toOpaque()
-            )
-            var status = AudioUnitSetProperty(input, kAudioOutputUnitProperty_SetInputCallback,
-                                               kAudioUnitScope_Global, 0,
-                                               &inputCallbackStruct, UInt32(MemoryLayout<AURenderCallbackStruct>.size))
-            guard status == noErr else { throw AUError("Set input capture callback", status) }
-
-            // 8. Wire output render chain: output ← EQ ← captureBuffer
-            let eqRef = EQRenderRef(eqUnit: eq, buffer: capBuf, generation: gen)
+            // 7. Wire output render chain: output ← EQ ← shared memory
+            let eqRef = EQRenderRef(eqUnit: eq, reader: reader, generation: gen)
             self.eqRenderRef = eqRef
 
             var outputCallbackStruct = AURenderCallbackStruct(
                 inputProc: outputRenderCallback,
                 inputProcRefCon: Unmanaged.passUnretained(eqRef).toOpaque()
             )
-            status = AudioUnitSetProperty(output, kAudioUnitProperty_SetRenderCallback,
+            var status = AudioUnitSetProperty(output, kAudioUnitProperty_SetRenderCallback,
                                            kAudioUnitScope_Input, 0,
                                            &outputCallbackStruct, UInt32(MemoryLayout<AURenderCallbackStruct>.size))
             guard status == noErr else { throw AUError("Set output render callback", status) }
 
-            // 9. Set EQ render callback to read from captureBuffer
+            // 8. Set EQ render callback to read from shared memory
             var eqInputCallbackStruct = AURenderCallbackStruct(
                 inputProc: eqInputRenderCallback,
                 inputProcRefCon: Unmanaged.passUnretained(eqRef).toOpaque()
@@ -191,28 +174,20 @@ final class EQEngineService: ObservableObject {
                                            &eqInputCallbackStruct, UInt32(MemoryLayout<AURenderCallbackStruct>.size))
             guard status == noErr else { throw AUError("Set EQ input render callback", status) }
 
-            // 10. Initialize all units
-            status = AudioUnitInitialize(input)
-            guard status == noErr else { throw AUError("Initialize input AUHAL", status) }
-
+            // 9. Initialize all units
             status = AudioUnitInitialize(eq)
             guard status == noErr else { throw AUError("Initialize EQ", status) }
 
             status = AudioUnitInitialize(output)
             guard status == noErr else { throw AUError("Initialize output AUHAL", status) }
 
-            // 11. Clear the render-stopped flag before starting IO
+            // 10. Clear the render-stopped flag before starting IO
             OSAtomicCompareAndSwap32(1, 0, gRenderStopped)
 
-            // Start input AUHAL first (begins capturing from virtual device)
-            status = AudioOutputUnitStart(input)
-            guard status == noErr else { throw AUError("Start input AUHAL", status) }
-
-            // 12. Start output AUHAL (drives the output render chain)
+            // 11. Start output AUHAL (drives the output render chain)
             status = AudioOutputUnitStart(output)
             guard status == noErr else { throw AUError("Start output AUHAL", status) }
 
-            self.inputAU  = input
             self.eqAU     = eq
             self.outputAU = output
 
@@ -338,14 +313,12 @@ final class EQEngineService: ObservableObject {
             // Normal shutdown — stop IO first (drains audio threads),
             // then dispose.
             if let au = outputAU { AudioOutputUnitStop(au); AudioComponentInstanceDispose(au) }
-            if let au = inputAU  { AudioOutputUnitStop(au); AudioComponentInstanceDispose(au) }
             if let au = eqAU     { AudioComponentInstanceDispose(au) }
         }
         outputAU = nil
-        inputAU  = nil
         eqAU     = nil
 
-        // Do NOT nil eqRenderRef, inputCaptureRef, or captureBuffer here.
+        // Do NOT nil eqRenderRef or sharedReader here.
         // An IO thread may still be mid-callback holding a raw pointer to them.
         // The generation counter ensures stale callbacks return immediately.
         // They will be replaced when the next start() creates new ones,
@@ -425,52 +398,6 @@ final class EQEngineService: ObservableObject {
     }
 
     // MARK: - Private: Create Audio Units
-
-    private func createInputAUHAL(device: AudioObjectID, format: AudioStreamBasicDescription) throws -> AudioUnit {
-        var desc = AudioComponentDescription(
-            componentType: kAudioUnitType_Output,
-            componentSubType: kAudioUnitSubType_HALOutput,
-            componentManufacturer: kAudioUnitManufacturer_Apple,
-            componentFlags: 0, componentFlagsMask: 0
-        )
-        guard let comp = AudioComponentFindNext(nil, &desc) else {
-            throw AUError("Find HALOutput component", -1)
-        }
-        var au: AudioUnit?
-        var status = AudioComponentInstanceNew(comp, &au)
-        guard status == noErr, let unit = au else { throw AUError("Create input AUHAL", status) }
-
-        // Enable input on element 1
-        var enableIO: UInt32 = 1
-        status = AudioUnitSetProperty(unit, kAudioOutputUnitProperty_EnableIO,
-                                       kAudioUnitScope_Input, 1,
-                                       &enableIO, UInt32(MemoryLayout<UInt32>.size))
-        guard status == noErr else { throw AUError("Enable input IO", status) }
-
-        // Disable output on element 0
-        var disableIO: UInt32 = 0
-        status = AudioUnitSetProperty(unit, kAudioOutputUnitProperty_EnableIO,
-                                       kAudioUnitScope_Output, 0,
-                                       &disableIO, UInt32(MemoryLayout<UInt32>.size))
-        guard status == noErr else { throw AUError("Disable output IO on input unit", status) }
-
-        // Set device
-        var dev = device
-        status = AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice,
-                                       kAudioUnitScope_Global, 0,
-                                       &dev, UInt32(MemoryLayout<AudioObjectID>.size))
-        guard status == noErr else { throw AUError("Set input device", status) }
-
-        // Set the output format of element 1 (what the capture callback reads)
-        var fmt = format
-        status = AudioUnitSetProperty(unit, kAudioUnitProperty_StreamFormat,
-                                       kAudioUnitScope_Output, 1,
-                                       &fmt, UInt32(MemoryLayout<AudioStreamBasicDescription>.size))
-        guard status == noErr else { throw AUError("Set input AUHAL output format", status) }
-
-        AppLogger.error("[EQ-DIAG] input AUHAL created, device=\(device)")
-        return unit
-    }
 
     private func createOutputAUHAL(device: AudioObjectID, format: AudioStreamBasicDescription) throws -> AudioUnit {
         var desc = AudioComponentDescription(
@@ -570,21 +497,6 @@ final class EQEngineService: ObservableObject {
 
     // MARK: - Private: Format helpers
 
-    private func makeInterleavedFormat(sampleRate: Float64, channels: UInt32) -> AudioStreamBasicDescription {
-        let bytesPerFrame = channels * 4
-        return AudioStreamBasicDescription(
-            mSampleRate: sampleRate,
-            mFormatID: kAudioFormatLinearPCM,
-            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
-            mBytesPerPacket: bytesPerFrame,
-            mFramesPerPacket: 1,
-            mBytesPerFrame: bytesPerFrame,
-            mChannelsPerFrame: channels,
-            mBitsPerChannel: 32,
-            mReserved: 0
-        )
-    }
-
     private func makeNonInterleavedFormat(sampleRate: Float64, channels: UInt32) -> AudioStreamBasicDescription {
         AudioStreamBasicDescription(
             mSampleRate: sampleRate,
@@ -650,35 +562,8 @@ final class EQEngineService: ObservableObject {
 
 // MARK: - C function callbacks (no captures allowed)
 
-/// Called by the input AUHAL when it has captured audio from the virtual device.
-/// We call AudioUnitRender on element 1 to pull the captured data, then store it
-/// in the CaptureBuffer for the output side to read.
-private func inputCaptureCallback(
-    _ inRefCon: UnsafeMutableRawPointer,
-    _ ioActionFlags: UnsafeMutablePointer<AudioUnitRenderActionFlags>,
-    _ inTimeStamp: UnsafePointer<AudioTimeStamp>,
-    _ inBusNumber: UInt32,
-    _ inNumberFrames: UInt32,
-    _ ioData: UnsafeMutablePointer<AudioBufferList>?
-) -> OSStatus {
-    if gRenderStopped.pointee != 0 { return noErr }
-    let ref = Unmanaged<InputCaptureRef>.fromOpaque(inRefCon).takeUnretainedValue()
-    if ref.generation != gGeneration.pointee { return noErr }
-
-    // Prepare interleaved buffer list for the captured data
-    let bufferList = ref.buffer.prepareForCapture(frameCount: inNumberFrames)
-
-    // Pull captured audio from the input AUHAL's element 1
-    let status = AudioUnitRender(ref.unit, ioActionFlags, inTimeStamp, 1, inNumberFrames, bufferList)
-
-    if status == noErr {
-        ref.buffer.commitCapture(frameCount: inNumberFrames)
-    }
-    return noErr
-}
-
 /// Called by the output AUHAL when it needs audio to play.
-/// Renders through the EQ unit (which itself pulls from captureBuffer via eqInputRenderCallback).
+/// Renders through the EQ unit (which itself pulls from shared memory via eqInputRenderCallback).
 private func outputRenderCallback(
     _ inRefCon: UnsafeMutableRawPointer,
     _ ioActionFlags: UnsafeMutablePointer<AudioUnitRenderActionFlags>,
@@ -689,7 +574,6 @@ private func outputRenderCallback(
 ) -> OSStatus {
     // Bail out if engine is being torn down — refs may be invalid
     if gRenderStopped.pointee != 0 {
-        // Fill silence
         if let ioData = ioData {
             let ablPtr = UnsafeMutableAudioBufferListPointer(ioData)
             for buf in ablPtr {
@@ -711,7 +595,7 @@ private func outputRenderCallback(
 }
 
 /// Called by the EQ AudioUnit when it needs input data.
-/// Copies from the CaptureBuffer into the provided AudioBufferList.
+/// Reads from the driver's shared memory region (no TCC microphone permission needed).
 private func eqInputRenderCallback(
     _ inRefCon: UnsafeMutableRawPointer,
     _ ioActionFlags: UnsafeMutablePointer<AudioUnitRenderActionFlags>,
@@ -737,141 +621,8 @@ private func eqInputRenderCallback(
         return noErr
     }
 
-    ref.buffer.read(into: ioData, frameCount: inNumberFrames)
+    ref.reader.read(into: ioData, frameCount: inNumberFrames)
     return noErr
-}
-
-// MARK: - CaptureBuffer
-
-/// Thread-safe ring buffer for passing audio between the input capture callback
-/// and the output render callback. Captures interleaved stereo Float32 (matching the
-/// virtual device driver format), reads as deinterleaved for the EQ unit.
-/// Uses a lock-based ring buffer so multiple captures accumulate between output reads.
-private final class CaptureBuffer {
-    let channels: Int
-    let maxFrames: Int
-    private let capacity: Int          // total Float32 samples in ring
-    private var ring: UnsafeMutablePointer<Float>
-    private var writePos: Int = 0
-    private var readPos: Int = 0
-    private var lock = os_unfair_lock()
-
-    // Pre-allocated interleaved AudioBufferList for capture
-    private var captureABL: UnsafeMutablePointer<AudioBufferList>
-    private var captureBuffer: UnsafeMutablePointer<Float>
-    // Pre-allocated temp buffer for deinterleaving in read() — avoids malloc on RT thread
-    private var readTemp: UnsafeMutablePointer<Float>
-
-    init(channels: Int, maxFrames: Int) {
-        self.channels = channels
-        self.maxFrames = maxFrames
-
-        // Ring holds ~42ms of audio at 48000 Hz stereo (2048 frames).
-        // Enough headroom for jitter between capture and output callbacks.
-        // Overflows drop oldest data (bounded latency).
-        capacity = 2048 * channels
-        ring = .allocate(capacity: capacity)
-        ring.initialize(repeating: 0, count: capacity)
-
-        // Temp buffer for capture callback
-        let capSize = maxFrames * channels
-        captureBuffer = .allocate(capacity: capSize)
-        captureBuffer.initialize(repeating: 0, count: capSize)
-
-        // Temp buffer for read/deinterleave (same max size as ring capacity)
-        readTemp = .allocate(capacity: capacity)
-        readTemp.initialize(repeating: 0, count: capacity)
-
-        captureABL = UnsafeMutableRawPointer.allocate(
-            byteCount: MemoryLayout<AudioBufferList>.size,
-            alignment: MemoryLayout<AudioBufferList>.alignment
-        ).bindMemory(to: AudioBufferList.self, capacity: 1)
-    }
-
-    deinit {
-        ring.deallocate()
-        captureBuffer.deallocate()
-        readTemp.deallocate()
-        captureABL.deallocate()
-    }
-
-    /// Returns an interleaved ABL for the input AUHAL capture callback to fill.
-    func prepareForCapture(frameCount: UInt32) -> UnsafeMutablePointer<AudioBufferList> {
-        let ablPtr = captureABL
-        ablPtr.pointee.mNumberBuffers = 1
-        let bufs = UnsafeMutableAudioBufferListPointer(ablPtr)
-        bufs[0].mNumberChannels = UInt32(channels)
-        bufs[0].mDataByteSize = frameCount * UInt32(channels) * 4
-        bufs[0].mData = UnsafeMutableRawPointer(captureBuffer)
-        return ablPtr
-    }
-
-    /// After capture is done, copy interleaved data into the ring buffer.
-    /// If the ring would overflow, advance readPos to drop oldest data (bounded latency).
-    func commitCapture(frameCount fc: UInt32) {
-        let elementCount = Int(fc) * channels
-        os_unfair_lock_lock(&lock)
-
-        // Check how much free space
-        let filled = (writePos - readPos + capacity) % capacity
-        let free = capacity - 1 - filled  // -1 to distinguish full from empty
-        if elementCount > free {
-            // Drop oldest data by advancing readPos
-            let drop = elementCount - free
-            readPos = (readPos + drop) % capacity
-        }
-
-        let avail = capacity - writePos
-        if elementCount <= avail {
-            ring.advanced(by: writePos).update(from: captureBuffer, count: elementCount)
-        } else {
-            ring.advanced(by: writePos).update(from: captureBuffer, count: avail)
-            ring.update(from: captureBuffer.advanced(by: avail), count: elementCount - avail)
-        }
-        writePos = (writePos + elementCount) % capacity
-        os_unfair_lock_unlock(&lock)
-    }
-
-    /// Read captured interleaved data into a non-interleaved ABL (for the EQ unit).
-    /// Deinterleaves on the fly: ring[frame*ch + c] → dst_c[frame]
-    func read(into abl: UnsafeMutablePointer<AudioBufferList>, frameCount: UInt32) {
-        let ablBufs = UnsafeMutableAudioBufferListPointer(abl)
-        let elementCount = Int(frameCount) * channels
-
-        os_unfair_lock_lock(&lock)
-        let filled = (writePos - readPos + capacity) % capacity
-        let elementsToRead = min(filled, elementCount)
-        let framesToRead = elementsToRead / channels
-        let rp = readPos
-
-        // Advance read position
-        readPos = (readPos + elementsToRead) % capacity
-
-        // Copy from ring into pre-allocated temp buffer for deinterleaving
-        // (ring may wrap around)
-        let avail = capacity - rp
-        let temp = readTemp
-        if elementsToRead <= avail {
-            temp.update(from: ring.advanced(by: rp), count: elementsToRead)
-        } else {
-            temp.update(from: ring.advanced(by: rp), count: avail)
-            temp.advanced(by: avail).update(from: ring, count: elementsToRead - avail)
-        }
-        os_unfair_lock_unlock(&lock)
-
-        // Deinterleave into the non-interleaved ABL
-        for ch in 0..<min(channels, Int(ablBufs.count)) {
-            guard let dst = ablBufs[ch].mData?.assumingMemoryBound(to: Float.self) else { continue }
-            for f in 0..<framesToRead {
-                dst[f] = temp[f * channels + ch]
-            }
-            // Zero-fill remaining
-            if framesToRead < Int(frameCount) {
-                memset(dst.advanced(by: framesToRead), 0, (Int(frameCount) - framesToRead) * MemoryLayout<Float>.size)
-            }
-            ablBufs[ch].mDataByteSize = frameCount * 4
-        }
-    }
 }
 
 // MARK: - Reference types for C callbacks
@@ -885,24 +636,13 @@ private let gRenderStopped = UnsafeMutablePointer<Int32>.allocate(capacity: 1)
 /// Generation counter — incremented on every start(). Callbacks check this to detect stale refs.
 private let gGeneration = UnsafeMutablePointer<Int32>.allocate(capacity: 1)
 
-private final class InputCaptureRef {
-    let unit: AudioUnit
-    let buffer: CaptureBuffer
-    let generation: Int32
-    init(unit: AudioUnit, buffer: CaptureBuffer, generation: Int32) {
-        self.unit = unit
-        self.buffer = buffer
-        self.generation = generation
-    }
-}
-
 private final class EQRenderRef {
     let eqUnit: AudioUnit
-    let buffer: CaptureBuffer
+    let reader: SharedAudioReader
     let generation: Int32
-    init(eqUnit: AudioUnit, buffer: CaptureBuffer, generation: Int32) {
+    init(eqUnit: AudioUnit, reader: SharedAudioReader, generation: Int32) {
         self.eqUnit = eqUnit
-        self.buffer = buffer
+        self.reader = reader
         self.generation = generation
     }
 }

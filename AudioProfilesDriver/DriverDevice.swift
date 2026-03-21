@@ -219,7 +219,7 @@ func deviceDoIOOperation(
     switch operationID {
 
     case kAPIOOperationWriteMix:
-        // System audio → ring buffer (real-time path — keep minimal)
+        // System audio → ring buffer + shared memory (real-time path — keep minimal)
         let abl = ioAudioBufferList.pointee
         if abl.mNumberBuffers > 0 {
             let buf = abl.mBuffers
@@ -233,6 +233,9 @@ func deviceDoIOOperation(
             }
 
             ring.write(from: ptr, frameCount: frames)
+
+            // Also write to shared memory for TCC-free app-side reading
+            DriverState.shared.sharedBuffer?.write(from: ptr, frameCount: frames)
         }
 
     case kAPIOOperationReadInput:

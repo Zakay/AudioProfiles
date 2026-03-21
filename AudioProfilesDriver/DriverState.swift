@@ -74,6 +74,7 @@ final class DriverState: @unchecked Sendable {
     var sampleRate: Float64 = kSampleRate {
         didSet {
             guard oldValue != sampleRate else { return }
+            sharedBuffer?.updateSampleRate(sampleRate)
             notifyPropertiesChanged(
                 objectID: kObjectID_Device,
                 selectors: [kAudioDevicePropertyNominalSampleRate,
@@ -157,6 +158,7 @@ final class DriverState: @unchecked Sendable {
         ioClientCount = max(0, ioClientCount - 1)
         if ioClientCount == 0 {
             ringBuffer.reset()
+            sharedBuffer?.reset()
         }
         os_unfair_lock_unlock(&ioLock)
     }
@@ -171,6 +173,13 @@ final class DriverState: @unchecked Sendable {
 
     /// The loopback ring buffer: WriteMix writes here, ReadInput reads here.
     let ringBuffer = RingBuffer(frameCount: kRingBufferFrameCount)
+
+    // MARK: Shared memory buffer
+
+    /// Cross-process shared memory buffer for TCC-free audio transfer.
+    /// The companion app reads from this via mmap instead of using Core Audio
+    /// input APIs (which would trigger TCC microphone permission).
+    let sharedBuffer: SharedAudioBuffer? = SharedAudioBuffer()
 
     // MARK: Timing (GetZeroTimeStamp)
 
