@@ -21,23 +21,24 @@ struct EQBand: Codable, Equatable {
 
 // MARK: - EQ Settings
 
-/// Full EQ configuration for one output device in one profile.
-/// Stored in Profile.eqSettings keyed by device UID.
+/// Full EQ configuration for one output device.
+/// Stored globally via EQStore, keyed by device UID.
 struct EQSettings: Codable, Equatable {
 
     // MARK: Constants
 
-    /// The ten standard frequencies AudioProfiles exposes, matching the screenshot
+    /// The ten standard frequencies for the 10-band EQ
     static let standardFrequencies: [Float] = [32, 64, 125, 250, 500, 1_000, 2_000, 4_000, 8_000, 16_000]
 
-    static let gainRange: ClosedRange<Float>  = -12 ... 12
-    static let preampRange: ClosedRange<Float> = -12 ... 12
+    static let gainRange: ClosedRange<Float>      = -12 ... 12
+    static let preampRange: ClosedRange<Float>    = -12 ... 12
+    static let bandwidthRange: ClosedRange<Float> = 0.1 ... 5.0
 
     // MARK: Properties
 
     /// Master gain applied before all bands (dB)
     var preamp: Float
-    /// Exactly 10 bands aligned to standardFrequencies
+    /// 10 bands at standard frequencies
     var bands: [EQBand]
 
     // MARK: Derived
@@ -59,11 +60,19 @@ struct EQSettings: Codable, Equatable {
 
     // MARK: Helpers
 
-    /// Return a copy with the given band updated
+    /// Return a copy with the given band's gain updated
     func withBand(at index: Int, gain: Float) -> EQSettings {
         guard index >= 0 && index < bands.count else { return self }
         var copy = self
         copy.bands[index].gain = gain.clamped(to: EQSettings.gainRange)
+        return copy
+    }
+
+    /// Return a copy with the given band's bandwidth updated
+    func withBand(at index: Int, bandwidth: Float) -> EQSettings {
+        guard index >= 0 && index < bands.count else { return self }
+        var copy = self
+        copy.bands[index].bandwidth = bandwidth.clamped(to: EQSettings.bandwidthRange)
         return copy
     }
 

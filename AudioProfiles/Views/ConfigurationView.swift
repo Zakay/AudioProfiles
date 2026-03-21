@@ -177,7 +177,8 @@ struct ConfigurationView: View {
                                 .buttonStyle(.bordered)
                             }
                         }
-                        .padding(.vertical, 4)
+                        .padding(.vertical, 8)
+                        .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
                         .contextMenu {
                             // Only show delete option for non-system default profiles
                             if !profile.isSystemDefault {
@@ -207,14 +208,13 @@ struct ConfigurationView: View {
                         }
                     }
                 }
-                .listStyle(.inset)
+                .listStyle(.plain)
                 .scrollContentBackground(.hidden)
-                .frame(height: 345)
+                .frame(maxHeight: 345)
             }
-            .padding()
-            .background(Color(NSColor.controlBackgroundColor))
-            .cornerRadius(12)
-            
+
+            Spacer(minLength: 0)
+
             // Settings Section
             VStack(spacing: 12) {
                 HStack {
@@ -247,8 +247,7 @@ struct ConfigurationView: View {
         }
         .padding(.horizontal)
         .padding(.bottom)
-        .padding(.top, 12)
-        .background(Color(NSColor.windowBackgroundColor))
+        .padding(.top, 8)
     }
     
     @available(macOS 13.0, *)

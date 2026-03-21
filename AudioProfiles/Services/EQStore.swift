@@ -9,8 +9,10 @@ final class EQStore: ObservableObject {
     static let shared = EQStore()
 
     @Published private(set) var settings: [String: EQSettings] = [:]
+    @Published private(set) var modes: [String: EQMode] = [:]
 
     private let defaultsKey = "com.audioprofiles.eqsettings.v1"
+    private let modesKey = "com.audioprofiles.eqmodes.v1"
 
     private init() { load() }
 
@@ -38,18 +40,37 @@ final class EQStore: ObservableObject {
         save()
     }
 
+    /// Get the EQ mode for a device (defaults to .custom).
+    func mode(for deviceUID: String) -> EQMode {
+        modes[deviceUID] ?? .custom
+    }
+
+    /// Set the EQ mode for a device.
+    func setMode(_ mode: EQMode, for deviceUID: String) {
+        modes[deviceUID] = mode
+        saveModes()
+    }
+
     // MARK: - Persistence
 
     private func load() {
-        guard
-            let data = UserDefaults.standard.data(forKey: defaultsKey),
-            let decoded = try? JSONDecoder().decode([String: EQSettings].self, from: data)
-        else { return }
-        settings = decoded
+        if let data = UserDefaults.standard.data(forKey: defaultsKey),
+           let decoded = try? JSONDecoder().decode([String: EQSettings].self, from: data) {
+            settings = decoded
+        }
+        if let data = UserDefaults.standard.data(forKey: modesKey),
+           let decoded = try? JSONDecoder().decode([String: EQMode].self, from: data) {
+            modes = decoded
+        }
     }
 
     private func save() {
         guard let data = try? JSONEncoder().encode(settings) else { return }
         UserDefaults.standard.set(data, forKey: defaultsKey)
+    }
+
+    private func saveModes() {
+        guard let data = try? JSONEncoder().encode(modes) else { return }
+        UserDefaults.standard.set(data, forKey: modesKey)
     }
 }
