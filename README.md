@@ -4,11 +4,11 @@
 
 **macOS Audio Profile Manager**
 
-AudioProfiles automatically switches audio input/output devices based on customizable profiles and hardware presence detection.
+AudioProfiles automatically switches audio input/output devices based on customizable profiles and hardware presence detection. It also includes a per-device equalizer with 4,800+ headphone presets.
 
 ## Why This App Exists
 
-While macOS has some automatic audio device switching, it never gets it right. As someone who regularly switches between different audio setups. I found myself constantly having to manually change devices even though macOS was supposed to handle this automatically.
+macOS has some automatic audio device switching, but it never gets it right. As someone who regularly switches between different audio setups, I found myself constantly having to manually change devices even though macOS was supposed to handle this automatically.
 
 The frustration was especially acute when moving between environments. I wanted something that would ensure the right devices are always used when I plug into my home setup versus my office setup. Having an external microphone, I also wanted to make sure I always use that microphone whether I'm using my headset or speakers.
 
@@ -20,16 +20,26 @@ I needed a solution that would:
 
 ## What It Does
 
-AudioProfiles is a native macOS menu bar app that reliably manages your audio devices through customizable profiles.
+AudioProfiles is a native macOS menu bar app that reliably manages your audio devices through customizable profiles, and lets you fine-tune your sound with a built-in per-device equalizer.
 
 ## Features
 
+### Audio Profiles
 - **Automatic Profile Switching** - Activates profiles when specific devices are connected
-- **Public/Private Modes** - Separate device priorities for speakers vs. headphones scenarios  
+- **Public/Private Modes** - Separate device priorities for speakers vs. headphones scenarios
 - **Global Hotkeys** - Keyboard shortcuts to instantly switch between profiles
 - **Device Priorities** - Fallback lists when preferred devices aren't available
 - **Menu Bar Interface** - Always-visible status with one-click profile switching
 - **Disable Auto-switching** - Temporarily disable automatic changes, or use manual mode with quick profile-based setup
+
+### Per-Device Equalizer
+- **10-Band Parametric EQ** - Interactive frequency response graph with draggable band controls
+- **4,800+ Headphone Presets** - Calibrated EQ curves from the AutoEQ database covering 569 brands
+- **6 Target Curves** - Harman, Diffuse Field, and more — pick the sound signature you prefer
+- **Measured Frequency Response** - See your headphone's actual FR curve overlaid on the EQ graph
+- **Per-Device Persistence** - EQ settings and preset selections are saved independently for each output device
+- **Transparent Audio Pipeline** - Uses a lightweight HAL audio driver that routes through a real-time EQ processor; invisible when not in use
+- **Volume Sync** - System volume controls work seamlessly while EQ is active
 
 ## The Development Story
 
@@ -44,11 +54,12 @@ The entire development process was a deliberate learning experiment. I intention
 ## Getting Started
 
 1. **Clone and build** the project from source
-2. **Launch** the app—it creates a system default profile automatically
+2. **Launch** the app — it creates a system default profile automatically
 3. **Click the menu bar icon** to see your current audio setup
 4. **Click "Configure"** to create profiles for your different audio scenarios
 5. **Set up triggers** by assigning devices that should activate each profile
-6. **Enjoy automatic switching** as you connect/disconnect devices
+6. **Open the EQ tab** to install the audio driver (one-time, requires admin password) and set up per-device EQ
+7. **Enjoy automatic switching** and tuned audio as you connect/disconnect devices
 
 ## Contributing
 
