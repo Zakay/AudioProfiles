@@ -16,15 +16,17 @@ class ProfileActivationService: ObservableObject {
     // Direct service dependencies - no facade needed
     private let deviceControlService = AudioDeviceControlService()
     
-    func activateProfile(_ profile: Profile) {
+    func activateProfile(_ profile: Profile, restoredMode: ProfileMode? = nil) {
         activeProfile = profile
-        
-        // Switch to profile's preferred mode
-        if activeMode != profile.preferredMode {
-            activeMode = profile.preferredMode
-            AppLogger.info("Switched to \(profile.preferredMode.rawValue) mode (preferred by profile '\(profile.name)')")
+
+        // Use restored mode if provided (persisted from last session), otherwise profile's preferred mode
+        let targetMode = restoredMode ?? profile.preferredMode
+        if activeMode != targetMode {
+            activeMode = targetMode
+            AppLogger.info("Switched to \(targetMode.rawValue) mode for profile '\(profile.name)'"
+                + (restoredMode != nil ? " (restored)" : " (preferred)"))
         }
-        
+
         applyProfile(profile)
         AppLogger.info("Activated profile: \(profile.name)")
     }

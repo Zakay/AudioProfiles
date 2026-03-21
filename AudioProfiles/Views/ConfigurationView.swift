@@ -13,6 +13,43 @@ struct ConfigurationView: View {
     private let formatter = ProfileDisplayFormatter()
     
     var body: some View {
+        TabView {
+            profilesTab
+                .tabItem { Label("Profiles", systemImage: "person.2") }
+
+            EQTabView()
+                .tabItem { Label("EQ", systemImage: "slider.vertical.3") }
+        }
+        .frame(width: 530, height: 560)
+        .sheet(isPresented: $showAddProfileSheet) {
+            let newProfile = ProfileManager.shared.createNewProfileInstance()
+            ProfileEditorView(vm: ProfileEditorViewModel(profile: newProfile))
+        }
+        .sheet(item: $profileToEdit) { profile in
+            ProfileEditorView(vm: ProfileEditorViewModel(profile: profile))
+        }
+        .alert("Delete Profile", isPresented: Binding<Bool>(
+            get: { profileToDelete != nil },
+            set: { _ in profileToDelete = nil }
+        )) {
+            Button("Cancel", role: .cancel) { profileToDelete = nil }
+            Button("Delete", role: .destructive) {
+                if let profile = profileToDelete {
+                    if profileToEdit?.id == profile.id { profileToEdit = nil }
+                    ProfileManager.shared.remove(profileID: profile.id)
+                }
+                profileToDelete = nil
+            }
+        } message: {
+            if let profile = profileToDelete {
+                Text("Are you sure you want to delete '\(profile.name)'? This action cannot be undone.")
+            }
+        }
+    }
+
+    // MARK: - Profiles tab
+
+    private var profilesTab: some View {
         VStack(spacing: 16) {
             // Profiles List Section
             VStack(alignment: .leading, spacing: 12) {
@@ -212,36 +249,6 @@ struct ConfigurationView: View {
         .padding(.bottom)
         .padding(.top, 12)
         .background(Color(NSColor.windowBackgroundColor))
-        .frame(width: 530, height: 530)
-        .sheet(isPresented: $showAddProfileSheet) {
-            let newProfile = ProfileManager.shared.createNewProfileInstance()
-            ProfileEditorView(vm: ProfileEditorViewModel(profile: newProfile))
-        }
-        .sheet(item: $profileToEdit) { profile in
-            ProfileEditorView(vm: ProfileEditorViewModel(profile: profile))
-        }
-        .alert("Delete Profile", isPresented: Binding<Bool>(
-            get: { profileToDelete != nil },
-            set: { _ in profileToDelete = nil }
-        )) {
-            Button("Cancel", role: .cancel) { 
-                profileToDelete = nil
-            }
-            Button("Delete", role: .destructive) {
-                if let profile = profileToDelete {
-                    // Close edit sheet if this profile is being edited
-                    if profileToEdit?.id == profile.id {
-                        profileToEdit = nil
-                    }
-                    ProfileManager.shared.remove(profileID: profile.id)
-                }
-                profileToDelete = nil
-            }
-        } message: {
-            if let profile = profileToDelete {
-                Text("Are you sure you want to delete '\(profile.name)'? This action cannot be undone.")
-            }
-        }
     }
     
     @available(macOS 13.0, *)

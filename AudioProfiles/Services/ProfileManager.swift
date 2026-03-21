@@ -59,15 +59,15 @@ class ProfileManager: ObservableObject {
         setupServiceBindings()
         initialize()
     }
-    
+
     // MARK: - Initialization
-    
+
     private func setupServiceBindings() {
         // Forward published properties from activation service
         activationService.$activeProfile
             .assign(to: \.activeProfile, on: self)
             .store(in: &cancellables)
-            
+
         activationService.$activeMode
             .assign(to: \.activeMode, on: self)
             .store(in: &cancellables)
@@ -80,35 +80,46 @@ class ProfileManager: ObservableObject {
             .assign(to: \.activeInputDeviceName, on: self)
             .store(in: &cancellables)
     }
-    
+
     private func initialize() {
+        // Load profiles from UserDefaults (no Core Audio calls — safe during init)
         loadProfiles()
-        
-        // Initialize device history with current devices
-        let currentDevices = AudioDeviceFactory.getCurrentDevices()
-        AudioDeviceHistoryService.shared.updateDeviceHistory(with: currentDevices)
-        
+
+        // Set System Default immediately so UI has state before trigger detection runs
+        if !profiles.isEmpty {
+            if let systemDefault = profiles.first(where: { $0.name == "System Default" }) {
+                activationService.activateProfile(systemDefault, restoredMode: getSavedMode(for: systemDefault.id))
+            } else {
+                let first = profiles.first!
+                activationService.activateProfile(first, restoredMode: getSavedMode(for: first.id))
+            }
+        }
+
+        // Defer trigger detection to after init completes — ProfileTriggerService
+        // accesses ProfileManager.shared, which deadlocks if called during init.
+        DispatchQueue.main.async { [self] in
+            let currentDevices = AudioDeviceFactory.getCurrentDevices()
+            AudioDeviceHistoryService.shared.updateDeviceHistory(with: currentDevices)
+
+            // Run trigger detection to pick the right profile based on connected devices
+            ProfileTriggerService.shared.triggerAutoDetection()
+
+            // If no profile was activated by triggers, fall back to System Default
+            if activeProfile == nil && !profiles.isEmpty {
+                if let systemDefault = profiles.first(where: { $0.name == "System Default" }) {
+                    AppLogger.info("No trigger matched — activating System Default profile")
+                    activateProfile(with: systemDefault.id)
+                } else {
+                    activateProfile(with: profiles.first!.id)
+                }
+            }
+        }
+
         // Set up cleanup timer for expired devices
         Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { _ in
             self.periodicCleanup()
         }
-        
-        // Auto-activate appropriate profile
-        if activeProfile == nil && !profiles.isEmpty {
-            // Try to restore last used profile, otherwise use System Default
-            if let lastUsedProfileID = getLastUsedProfileID(),
-               let lastUsedProfile = getProfile(by: lastUsedProfileID) {
-                AppLogger.info("Restoring last used profile: \(lastUsedProfile.name)")
-                activateProfile(with: lastUsedProfile.id)
-            } else if let systemDefault = profiles.first(where: { $0.name == "System Default" }) {
-                AppLogger.info("Activating System Default profile")
-                activateProfile(with: systemDefault.id)
-            } else {
-                // Fallback to first profile when no System Default exists
-                activateProfile(with: profiles.first!.id)
-            }
-        }
-        
+
         // Subscribe to trigger events
         ProfileTriggerService.shared.triggerSubject
             .sink { [weak self] profileID in
@@ -120,8 +131,17 @@ class ProfileManager: ObservableObject {
                 self.activateProfile(with: profileID)
             }
             .store(in: &cancellables)
+
+        // After coreaudiod restarts, all devices reset — run the full trigger flow
+        AudioDeviceMonitor.shared.serviceRestartedSubject
+            .debounce(for: .seconds(1), scheduler: RunLoop.main)
+            .sink { [weak self] in
+                AppLogger.info("coreaudiod restarted — running full trigger detection flow")
+                ProfileTriggerService.shared.triggerAutoDetection()
+            }
+            .store(in: &cancellables)
     }
-    
+
     /// Call this after ProfileManager initialization is complete to start auto-detection
     func startTriggerDetection() {
         ProfileTriggerService.shared.triggerAutoDetection()
@@ -254,8 +274,10 @@ class ProfileManager: ObservableObject {
     func activateProfile(with id: UUID, isManual: Bool = false) {
         guard let profile = getProfile(by: id) else { return }
         
-        activationService.activateProfile(profile)
-        
+        // Restore previously saved mode for this profile (if any)
+        let restoredMode = getSavedMode(for: id)
+        activationService.activateProfile(profile, restoredMode: restoredMode)
+
         // Handle manual vs automatic selection differently
         if isManual {
             // Record manual selection timestamp
@@ -267,14 +289,16 @@ class ProfileManager: ObservableObject {
             lastManualSwitchTimestamp = nil
         }
         
-        // Save as last used profile (unless it's System Default)
-        if !profile.isSystemDefault {
-            saveLastUsedProfileID(id)
-        }
+        // Save mode for this profile so it persists across restarts
+        saveMode(activeMode, for: id)
     }
 
     func toggleMode() {
         activationService.toggleMode()
+        // Persist the new mode for the active profile
+        if let profileID = activeProfile?.id {
+            saveMode(activeMode, for: profileID)
+        }
     }
     
     func createNewProfileInstance() -> Profile {
@@ -475,15 +499,17 @@ class ProfileManager: ObservableObject {
         _ = persistenceService.saveProfiles(profiles)
     }
     
-    private func getLastUsedProfileID() -> UUID? {
-        guard let uuidString = UserDefaults.standard.string(forKey: "LastUsedProfileID") else {
+    // MARK: - Per-Profile Mode Persistence
+
+    private func getSavedMode(for profileID: UUID) -> ProfileMode? {
+        guard let raw = UserDefaults.standard.string(forKey: "ProfileMode_\(profileID.uuidString)") else {
             return nil
         }
-        return UUID(uuidString: uuidString)
+        return ProfileMode(rawValue: raw)
     }
-    
-    private func saveLastUsedProfileID(_ id: UUID) {
-        UserDefaults.standard.set(id.uuidString, forKey: "LastUsedProfileID")
+
+    private func saveMode(_ mode: ProfileMode, for profileID: UUID) {
+        UserDefaults.standard.set(mode.rawValue, forKey: "ProfileMode_\(profileID.uuidString)")
     }
     
     /// Clear manual override timestamp
