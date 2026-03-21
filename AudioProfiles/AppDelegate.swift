@@ -26,17 +26,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   func applicationWillTerminate(_ notification: Notification) {
-    // If EQ is running, restore the real output device before quitting
-    // so the user isn't left on a dead virtual device.
-    // All calls here must be synchronous — the process exits immediately after.
-    let engine = EQEngineService.shared
-    if engine.isRunning, let realUID = engine.targetDeviceUID {
-      let devices = AudioDeviceFactory.getCurrentDevices()
-      if let realDevice = devices.first(where: { $0.id == realUID && $0.isOutput }) {
-        let ok = AudioDeviceControlService().setDefaultOutputDevice(realDevice)
-        AppLogger.info("App terminating: restored default output to '\(realDevice.name)' → \(ok)")
-      }
-    }
+    // Synchronously tears down EQ, hides virtual device, restores real output.
+    EQEngineService.shared.stopForTermination()
   }
 
   func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {

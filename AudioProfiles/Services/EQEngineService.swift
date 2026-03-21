@@ -255,39 +255,7 @@ final class EQEngineService: ObservableObject {
     // MARK: - Stop
 
     func stopSafe(switchTo realDeviceUID: String) {
-        AppLogger.info("EQEngineService: stopping, switching back to \(realDeviceUID)")
-
-        // Capture the current volume from the virtual device before tearing down,
-        // so we can restore it on the real device (user expects volume to stay the same).
-        let restoreVolume: Float32?
-        if let vID = virtualDeviceID {
-            restoreVolume = getDeviceVolume(vID)
-        } else {
-            restoreVolume = nil
-        }
-
-        stopEngineOnly()
-        EQDriverService.shared.hide()
-
-        targetDeviceUID = nil
-        isRunning = false
-
-        // Restore default output on a background queue — Core Audio calls can hang
-        // during coreaudiod restart if called on the main thread.
-        DispatchQueue.global(qos: .userInitiated).async { [self] in
-            let devices = AudioDeviceFactory.getCurrentDevices()
-            if let realDevice = devices.first(where: { $0.id == realDeviceUID && $0.isOutput }) {
-                let controlService = AudioDeviceControlService()
-                let ok = controlService.setDefaultOutputDevice(realDevice)
-                AppLogger.info("EQEngineService: restored default output to '\(realDevice.name)' → \(ok)")
-
-                // Restore the volume the user had set while EQ was active
-                if let vol = restoreVolume, let realID = translateUID(realDeviceUID) {
-                    setDeviceVolume(realID, volume: vol)
-                    AppLogger.info("EQEngineService: restored volume to \(String(format: "%.0f%%", vol * 100))")
-                }
-            }
-        }
+        teardown(switchTo: realDeviceUID, synchronous: false)
     }
 
     func stopSafe() {
@@ -295,7 +263,51 @@ final class EQEngineService: ObservableObject {
             EQDriverService.shared.hide()
             return
         }
-        stopSafe(switchTo: uid)
+        teardown(switchTo: uid, synchronous: false)
+    }
+
+    /// Call from applicationWillTerminate only — same as stopSafe but blocks until
+    /// the device switch completes, since the process exits immediately after return.
+    func stopForTermination() {
+        guard isRunning, let uid = targetDeviceUID else {
+            EQDriverService.shared.hide()
+            return
+        }
+        teardown(switchTo: uid, synchronous: true)
+    }
+
+    // MARK: - Private: shared teardown
+
+    private func teardown(switchTo realDeviceUID: String, synchronous: Bool) {
+        AppLogger.info("EQEngineService: stopping, switching back to \(realDeviceUID)")
+
+        // Capture volume before teardown so we can restore it on the real device.
+        let restoreVolume = virtualDeviceID.flatMap { getDeviceVolume($0) }
+
+        stopEngineOnly()
+        EQDriverService.shared.hide()
+        targetDeviceUID = nil
+        isRunning = false
+
+        let work = { [self] in
+            let devices = AudioDeviceFactory.getCurrentDevices()
+            if let realDevice = devices.first(where: { $0.id == realDeviceUID && $0.isOutput }) {
+                let ok = AudioDeviceControlService().setDefaultOutputDevice(realDevice)
+                AppLogger.info("EQEngineService: restored default output to '\(realDevice.name)' → \(ok)")
+                if let vol = restoreVolume, let realID = translateUID(realDeviceUID) {
+                    setDeviceVolume(realID, volume: vol)
+                    AppLogger.info("EQEngineService: restored volume to \(String(format: "%.0f%%", vol * 100))")
+                }
+            }
+        }
+
+        // Core Audio calls can hang if coreaudiod is restarting — use a background
+        // queue for normal stop. At termination we must block (process exits after return).
+        if synchronous {
+            work()
+        } else {
+            DispatchQueue.global(qos: .userInitiated).async(execute: work)
+        }
     }
 
     // MARK: - Live EQ update
