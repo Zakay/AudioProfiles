@@ -25,8 +25,8 @@ struct EQEditorView: View {
                EQEngineService.shared.targetDeviceUID == deviceUID {
                 // Engine already running for this device → live-update bands
                 Task { @MainActor in EQEngineService.shared.updateSettings(newSettings) }
-            } else if !newSettings.isFlat {
-                // Settings are non-flat and engine isn't running for this device → engage
+            } else if !newSettings.isFlat && !EQEngineService.shared.isRunning && isCurrentOutputDevice {
+                // Settings are non-flat, no engine running, device is the active output → engage
                 AppLogger.error("[EQ-DIAG] Engaging EQ for \(deviceName)")
                 engageEQ(settings: newSettings)
             }
@@ -39,6 +39,11 @@ struct EQEditorView: View {
                 EQEngineService.shared.stopSafe(switchTo: deviceUID)
             }
         }
+    }
+
+    /// Whether this device is the current system default output.
+    private var isCurrentOutputDevice: Bool {
+        AudioDeviceControlService().getDefaultOutputDevice()?.id == deviceUID
     }
 
     /// Start the EQ engine for this device if the driver is installed.

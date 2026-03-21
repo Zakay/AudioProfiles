@@ -8,5 +8,7 @@
 	<true/>
 	<key>ProfilesDirectoryURL</key>
 	<string>~/Library/Application Support/AudioProfiles</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>AudioProfiles needs microphone access to capture audio from the virtual device for EQ processing.</string>
 </dict>
 </plist>

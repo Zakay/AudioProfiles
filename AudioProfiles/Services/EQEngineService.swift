@@ -44,32 +44,43 @@ final class EQEngineService: ObservableObject {
     private var eqRenderRef:    EQRenderRef?
     private var inputCaptureRef: InputCaptureRef?
 
-    // Diagnostic counters
-    private var diagTimer: Timer?
-    private static let stats = UnsafeMutablePointer<RenderStats>.allocate(capacity: 1)
-
     private var cancellables = Set<AnyCancellable>()
 
     // MARK: - Init
     private init() {
-        Self.stats.initialize(to: RenderStats())
+        gRenderStopped.initialize(to: 0)
 
-        // When coreaudiod restarts, all Audio Unit references become invalid.
-        // Tear down immediately to avoid hangs from calling into dead hardware.
+        // Register a DIRECT Core Audio property listener for coreaudiod restart.
+        // This fires on the audio thread IMMEDIATELY — no async main-thread hop —
+        // so gRenderStopped is set before any IO callback can touch dead AUs.
+        var restartAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyServiceRestarted,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject),
+            &restartAddr,
+            nil  // fires on internal CA thread
+        ) { _, _ in
+            // Immediately poison all render callbacks — runs on audio thread
+            OSAtomicCompareAndSwap32(0, 1, gRenderStopped)
+        }
+
+        // Combine handler for main-thread cleanup (UI state, nil AUs, etc.)
         AudioDeviceMonitor.shared.serviceRestartedSubject
             .receive(on: DispatchQueue.main)
             .sink { [weak self] in
                 guard let self = self, self.isRunning else { return }
                 AppLogger.info("EQEngineService: coreaudiod restarted — tearing down pipeline")
-                // nil out units without calling AudioOutputUnitStop/Dispose (they're invalid)
-                self.diagTimer?.invalidate()
-                self.diagTimer = nil
+                // gRenderStopped already set by the direct listener above
+                // no-op: diagTimer removed
+                // Don't call AudioOutputUnitStop/Dispose — AUs are dead
                 self.outputAU = nil
                 self.inputAU  = nil
                 self.eqAU     = nil
-                self.eqRenderRef     = nil
-                self.inputCaptureRef = nil
-                self.captureBuffer   = nil
+                // Keep eqRenderRef, inputCaptureRef, captureBuffer alive —
+                // an IO thread may still be mid-callback with a pointer to them.
                 self.targetDeviceUID = nil
                 self.isRunning = false
                 EQDriverService.shared.hide()
@@ -94,7 +105,8 @@ final class EQEngineService: ObservableObject {
             return
         }
         EQDriverService.shared.show(name: virtualDeviceName)
-        Thread.sleep(forTimeInterval: 0.5)  // Let HAL propagate visibility change
+        // Brief pause for HAL to propagate visibility — 50ms is enough
+        Thread.sleep(forTimeInterval: 0.05)
 
         // 2. Resolve AudioObjectIDs
         guard let virtualObjectID = translateUID(virtualDevice.id) else {
@@ -110,13 +122,13 @@ final class EQEngineService: ObservableObject {
 
         AppLogger.error("[EQ-DIAG] virtualObjID=\(virtualObjectID) realObjID=\(realObjectID)")
 
-        // 3. Reset virtual device to its default 44100 Hz rate.
-        // The working standalone test used 44100 throughout. matchSampleRate to 48000
-        // broke the HAL's input IO cycle (ReadInput never fires at non-default rates).
-        // The output AUHAL handles rate conversion to the real device automatically.
-        resetVirtualDeviceRate(virtualObjectID, to: 44100)
-        Thread.sleep(forTimeInterval: 0.1)  // Let HAL digest the rate change
-        let virtualRate = getDeviceSampleRate(virtualObjectID) ?? 44100
+        // 3. Match virtual device sample rate to the real device rate.
+        // This avoids automatic sample rate conversion in the output AUHAL
+        // which adds significant latency and CPU overhead.
+        let realRate = getDeviceSampleRate(realObjectID) ?? 48000
+        resetVirtualDeviceRate(virtualObjectID, to: realRate)
+        Thread.sleep(forTimeInterval: 0.02)  // Brief pause for HAL to digest rate change
+        let virtualRate = getDeviceSampleRate(virtualObjectID) ?? realRate
         let channels: UInt32 = 2
         let inputFormat = makeInterleavedFormat(sampleRate: virtualRate, channels: channels)
         let eqFormat = makeNonInterleavedFormat(sampleRate: virtualRate, channels: channels)
@@ -134,7 +146,7 @@ final class EQEngineService: ObservableObject {
             let output = try createOutputAUHAL(device: realObjectID, format: outputFormat)
 
             // 7. Set up input capture callback (fires when input AUHAL has data)
-            let inputCapRef = InputCaptureRef(unit: input, buffer: capBuf, stats: Self.stats)
+            let inputCapRef = InputCaptureRef(unit: input, buffer: capBuf)
             self.inputCaptureRef = inputCapRef
 
             var inputCallbackStruct = AURenderCallbackStruct(
@@ -147,7 +159,7 @@ final class EQEngineService: ObservableObject {
             guard status == noErr else { throw AUError("Set input capture callback", status) }
 
             // 8. Wire output render chain: output ← EQ ← captureBuffer
-            let eqRef = EQRenderRef(eqUnit: eq, buffer: capBuf, stats: Self.stats)
+            let eqRef = EQRenderRef(eqUnit: eq, buffer: capBuf)
             self.eqRenderRef = eqRef
 
             var outputCallbackStruct = AURenderCallbackStruct(
@@ -179,7 +191,10 @@ final class EQEngineService: ObservableObject {
             status = AudioUnitInitialize(output)
             guard status == noErr else { throw AUError("Initialize output AUHAL", status) }
 
-            // 11. Start input AUHAL first (begins capturing from virtual device)
+            // 11. Clear the render-stopped flag before starting IO
+            OSAtomicCompareAndSwap32(1, 0, gRenderStopped)
+
+            // Start input AUHAL first (begins capturing from virtual device)
             status = AudioOutputUnitStart(input)
             guard status == noErr else { throw AUError("Start input AUHAL", status) }
 
@@ -218,22 +233,6 @@ final class EQEngineService: ObservableObject {
 
         self.targetDeviceUID = realDeviceUID
         self.isRunning = true
-
-        // Start diagnostic timer
-        Self.stats.pointee = RenderStats()
-        diagTimer?.invalidate()
-        diagTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            guard self?.isRunning == true else { return }
-            let s = Self.stats.pointee
-            let capPeak = Float32(bitPattern: s.capturePeak)
-            let eqInPeak = Float32(bitPattern: s.eqInputPeak)
-            let outPeak = Float32(bitPattern: s.outputPeak)
-            AppLogger.error("[EQ-DIAG] render stats: capture=\(s.captureCount) captureErr=\(s.captureErrors) lastCapErr=\(s.lastCaptureError) output=\(s.outputCount) outputErr=\(s.outputErrors) lastOutErr=\(s.lastOutputError) eqInput=\(s.eqInputCount) | peaks: cap=\(capPeak) eqIn=\(eqInPeak) out=\(outPeak)")
-            // Reset peaks for next interval
-            Self.stats.pointee.capturePeak = 0
-            Self.stats.pointee.eqInputPeak = 0
-            Self.stats.pointee.outputPeak = 0
-        }
 
         AppLogger.error("[EQ-DIAG] pipeline running ✓")
     }
@@ -276,17 +275,34 @@ final class EQEngineService: ObservableObject {
     // MARK: - Private: stop engine
 
     private func stopEngineOnly() {
-        diagTimer?.invalidate()
-        diagTimer = nil
-        if let au = outputAU { AudioOutputUnitStop(au); AudioComponentInstanceDispose(au) }
-        if let au = inputAU  { AudioOutputUnitStop(au); AudioComponentInstanceDispose(au) }
-        if let au = eqAU     { AudioComponentInstanceDispose(au) }
+        // Check if AUs are already dead (coreaudiod restart set the flag
+        // from the audio thread before this main-thread code runs).
+        let alreadyPoisoned = gRenderStopped.pointee != 0
+
+        // Signal render callbacks to bail out immediately — must happen
+        // BEFORE we stop/dispose AUs, because an IO thread may be
+        // mid-callback right now.
+        OSAtomicCompareAndSwap32(0, 1, gRenderStopped)
+
+        if alreadyPoisoned {
+            // AUs are dead (coreaudiod restarted) — calling Stop/Dispose
+            // on them would crash. Just nil the references.
+            AppLogger.info("EQEngineService: stopEngineOnly — AUs invalidated by coreaudiod restart, skipping dispose")
+        } else {
+            // Normal shutdown — stop IO first (drains audio threads),
+            // then dispose.
+            if let au = outputAU { AudioOutputUnitStop(au); AudioComponentInstanceDispose(au) }
+            if let au = inputAU  { AudioOutputUnitStop(au); AudioComponentInstanceDispose(au) }
+            if let au = eqAU     { AudioComponentInstanceDispose(au) }
+        }
         outputAU = nil
         inputAU  = nil
         eqAU     = nil
-        eqRenderRef     = nil
-        inputCaptureRef = nil
-        captureBuffer   = nil
+
+        // IMPORTANT: Do NOT nil eqRenderRef, inputCaptureRef, or captureBuffer here.
+        // An IO thread may still be mid-callback holding a raw pointer to them.
+        // They will be replaced when the next start() creates new ones,
+        // and the old ones will be deallocated naturally by ARC at that point.
     }
 
     // MARK: - Private: Create Audio Units
@@ -526,6 +542,7 @@ private func inputCaptureCallback(
     _ inNumberFrames: UInt32,
     _ ioData: UnsafeMutablePointer<AudioBufferList>?
 ) -> OSStatus {
+    if gRenderStopped.pointee != 0 { return noErr }
     let ref = Unmanaged<InputCaptureRef>.fromOpaque(inRefCon).takeUnretainedValue()
 
     // Prepare interleaved buffer list for the captured data
@@ -535,33 +552,9 @@ private func inputCaptureCallback(
     let status = AudioUnitRender(ref.unit, ioActionFlags, inTimeStamp, 1, inNumberFrames, bufferList)
 
     if status == noErr {
-        // Track peak level of captured audio
-        let ablPtr = UnsafeMutableAudioBufferListPointer(bufferList)
-        var peak: Float32 = 0
-        for buf in ablPtr {
-            if let data = buf.mData?.assumingMemoryBound(to: Float32.self) {
-                let count = Int(buf.mDataByteSize) / MemoryLayout<Float32>.size
-                for i in 0..<count {
-                    let v = abs(data[i])
-                    if v > peak { peak = v }
-                }
-            }
-        }
-        // Update peak using atomic CAS
-        let newBits = peak.bitPattern
-        var old = ref.stats.pointee.capturePeak
-        while newBits > old {
-            if OSAtomicCompareAndSwap32(Int32(bitPattern: old), Int32(bitPattern: newBits), UnsafeMutableRawPointer(&ref.stats.pointee.capturePeak).assumingMemoryBound(to: Int32.self)) { break }
-            old = ref.stats.pointee.capturePeak
-        }
         ref.buffer.commitCapture(frameCount: inNumberFrames)
-    } else {
-        ref.stats.pointee.lastCaptureError = Int64(status)
-        OSAtomicIncrement64(&ref.stats.pointee.captureErrors)
     }
-    OSAtomicIncrement64(&ref.stats.pointee.captureCount)
-
-    return noErr  // Always return noErr — don't propagate errors to the AUHAL
+    return noErr
 }
 
 /// Called by the output AUHAL when it needs audio to play.
@@ -574,34 +567,20 @@ private func outputRenderCallback(
     _ inNumberFrames: UInt32,
     _ ioData: UnsafeMutablePointer<AudioBufferList>?
 ) -> OSStatus {
-    let ref = Unmanaged<EQRenderRef>.fromOpaque(inRefCon).takeUnretainedValue()
-
-    let status = AudioUnitRender(ref.eqUnit, ioActionFlags, inTimeStamp, 0, inNumberFrames, ioData!)
-    if status == noErr {
-        // Track peak level of EQ output
-        let ablPtr = UnsafeMutableAudioBufferListPointer(ioData!)
-        var peak: Float32 = 0
-        for buf in ablPtr {
-            if let data = buf.mData?.assumingMemoryBound(to: Float32.self) {
-                let count = Int(buf.mDataByteSize) / MemoryLayout<Float32>.size
-                for i in 0..<count {
-                    let v = abs(data[i])
-                    if v > peak { peak = v }
-                }
+    // Bail out if engine is being torn down — refs may be invalid
+    if gRenderStopped.pointee != 0 {
+        // Fill silence
+        if let ioData = ioData {
+            let ablPtr = UnsafeMutableAudioBufferListPointer(ioData)
+            for buf in ablPtr {
+                if let data = buf.mData { memset(data, 0, Int(buf.mDataByteSize)) }
             }
         }
-        let newBits = peak.bitPattern
-        var old = ref.stats.pointee.outputPeak
-        while newBits > old {
-            if OSAtomicCompareAndSwap32(Int32(bitPattern: old), Int32(bitPattern: newBits), UnsafeMutableRawPointer(&ref.stats.pointee.outputPeak).assumingMemoryBound(to: Int32.self)) { break }
-            old = ref.stats.pointee.outputPeak
-        }
-    } else {
-        ref.stats.pointee.lastOutputError = Int64(status)
-        OSAtomicIncrement64(&ref.stats.pointee.outputErrors)
+        return noErr
     }
-    OSAtomicIncrement64(&ref.stats.pointee.outputCount)
-    return status
+    let ref = Unmanaged<EQRenderRef>.fromOpaque(inRefCon).takeUnretainedValue()
+
+    return AudioUnitRender(ref.eqUnit, ioActionFlags, inTimeStamp, 0, inNumberFrames, ioData!)
 }
 
 /// Called by the EQ AudioUnit when it needs input data.
@@ -614,29 +593,19 @@ private func eqInputRenderCallback(
     _ inNumberFrames: UInt32,
     _ ioData: UnsafeMutablePointer<AudioBufferList>?
 ) -> OSStatus {
+    if gRenderStopped.pointee != 0 {
+        if let ioData = ioData {
+            let ablPtr = UnsafeMutableAudioBufferListPointer(ioData)
+            for buf in ablPtr {
+                if let data = buf.mData { memset(data, 0, Int(buf.mDataByteSize)) }
+            }
+        }
+        return noErr
+    }
     let ref = Unmanaged<EQRenderRef>.fromOpaque(inRefCon).takeUnretainedValue()
     guard let ioData = ioData else { return kAudioUnitErr_InvalidParameter }
 
     ref.buffer.read(into: ioData, frameCount: inNumberFrames)
-    // Track peak level of data fed to EQ
-    let ablPtr = UnsafeMutableAudioBufferListPointer(ioData)
-    var peak: Float32 = 0
-    for buf in ablPtr {
-        if let data = buf.mData?.assumingMemoryBound(to: Float32.self) {
-            let count = Int(buf.mDataByteSize) / MemoryLayout<Float32>.size
-            for i in 0..<count {
-                let v = abs(data[i])
-                if v > peak { peak = v }
-            }
-        }
-    }
-    let newBits = peak.bitPattern
-    var old = ref.stats.pointee.eqInputPeak
-    while newBits > old {
-        if OSAtomicCompareAndSwap32(Int32(bitPattern: old), Int32(bitPattern: newBits), UnsafeMutableRawPointer(&ref.stats.pointee.eqInputPeak).assumingMemoryBound(to: Int32.self)) { break }
-        old = ref.stats.pointee.eqInputPeak
-    }
-    OSAtomicIncrement64(&ref.stats.pointee.eqInputCount)
     return noErr
 }
 
@@ -658,14 +627,17 @@ private final class CaptureBuffer {
     // Pre-allocated interleaved AudioBufferList for capture
     private var captureABL: UnsafeMutablePointer<AudioBufferList>
     private var captureBuffer: UnsafeMutablePointer<Float>
+    // Pre-allocated temp buffer for deinterleaving in read() — avoids malloc on RT thread
+    private var readTemp: UnsafeMutablePointer<Float>
 
     init(channels: Int, maxFrames: Int) {
         self.channels = channels
         self.maxFrames = maxFrames
 
-        // Ring holds ~23ms of audio at 44100 Hz stereo (1024 frames).
-        // Small ring = low latency. Overflows drop oldest data.
-        capacity = 1024 * channels
+        // Ring holds ~42ms of audio at 48000 Hz stereo (2048 frames).
+        // Enough headroom for jitter between capture and output callbacks.
+        // Overflows drop oldest data (bounded latency).
+        capacity = 2048 * channels
         ring = .allocate(capacity: capacity)
         ring.initialize(repeating: 0, count: capacity)
 
@@ -673,6 +645,10 @@ private final class CaptureBuffer {
         let capSize = maxFrames * channels
         captureBuffer = .allocate(capacity: capSize)
         captureBuffer.initialize(repeating: 0, count: capSize)
+
+        // Temp buffer for read/deinterleave (same max size as ring capacity)
+        readTemp = .allocate(capacity: capacity)
+        readTemp.initialize(repeating: 0, count: capacity)
 
         captureABL = UnsafeMutableRawPointer.allocate(
             byteCount: MemoryLayout<AudioBufferList>.size,
@@ -683,6 +659,7 @@ private final class CaptureBuffer {
     deinit {
         ring.deallocate()
         captureBuffer.deallocate()
+        readTemp.deallocate()
         captureABL.deallocate()
     }
 
@@ -738,11 +715,10 @@ private final class CaptureBuffer {
         // Advance read position
         readPos = (readPos + elementsToRead) % capacity
 
-        // Copy from ring into a temp contiguous buffer for deinterleaving
+        // Copy from ring into pre-allocated temp buffer for deinterleaving
         // (ring may wrap around)
         let avail = capacity - rp
-        let tempCount = elementsToRead
-        let temp = UnsafeMutablePointer<Float>.allocate(capacity: tempCount)
+        let temp = readTemp
         if elementsToRead <= avail {
             temp.update(from: ring.advanced(by: rp), count: elementsToRead)
         } else {
@@ -763,48 +739,33 @@ private final class CaptureBuffer {
             }
             ablBufs[ch].mDataByteSize = frameCount * 4
         }
-        temp.deallocate()
     }
 }
 
 // MARK: - Reference types for C callbacks
 
+/// Atomic flag shared between all render callbacks. When set to 1,
+/// callbacks return immediately without touching any AU or buffer state.
+/// This prevents crashes when stopEngineOnly() frees resources while
+/// an IO thread is mid-callback.
+private let gRenderStopped = UnsafeMutablePointer<Int32>.allocate(capacity: 1)
+
 private final class InputCaptureRef {
     let unit: AudioUnit
     let buffer: CaptureBuffer
-    let stats: UnsafeMutablePointer<RenderStats>
-    init(unit: AudioUnit, buffer: CaptureBuffer, stats: UnsafeMutablePointer<RenderStats>) {
+    init(unit: AudioUnit, buffer: CaptureBuffer) {
         self.unit = unit
         self.buffer = buffer
-        self.stats = stats
     }
 }
 
 private final class EQRenderRef {
     let eqUnit: AudioUnit
     let buffer: CaptureBuffer
-    let stats: UnsafeMutablePointer<RenderStats>
-    init(eqUnit: AudioUnit, buffer: CaptureBuffer, stats: UnsafeMutablePointer<RenderStats>) {
+    init(eqUnit: AudioUnit, buffer: CaptureBuffer) {
         self.eqUnit = eqUnit
         self.buffer = buffer
-        self.stats = stats
     }
-}
-
-// MARK: - Diagnostic stats
-
-private struct RenderStats {
-    var captureCount: Int64 = 0
-    var captureErrors: Int64 = 0
-    var lastCaptureError: Int64 = 0
-    var outputCount: Int64 = 0
-    var outputErrors: Int64 = 0
-    var lastOutputError: Int64 = 0
-    var eqInputCount: Int64 = 0
-    // Peak levels (atomic float via bitPattern)
-    var capturePeak: UInt32 = 0   // Float32 bitPattern of max abs sample from capture
-    var eqInputPeak: UInt32 = 0   // Float32 bitPattern of max abs sample fed to EQ
-    var outputPeak: UInt32 = 0    // Float32 bitPattern of max abs sample from EQ output
 }
 
 // MARK: - Helper: AUError

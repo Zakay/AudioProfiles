@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Standard bundle keys -->
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+
+    <key>CFBundleExecutable</key>
+    <string>AudioProfilesDriver</string>
+
+    <key>CFBundleIdentifier</key>
+    <string>com.audioprofiles.driver</string>
+
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+
+    <key>CFBundleName</key>
+    <string>AudioProfiles EQ Driver</string>
+
+    <key>CFBundlePackageType</key>
+    <string>BNDL</string>
+
+    <key>CFBundleShortVersionString</key>
+    <string>1.1.0</string>
+
+    <key>CFBundleVersion</key>
+    <string>2</string>
+
+    <!-- CFPlugin keys — tell coreaudiod which factory to call -->
+    <key>CFPlugInFactories</key>
+    <dict>
+        <!-- UUID must match kAudioServerPlugInTypeUUID defined in AudioServerPlugIn.h -->
+        <!-- This UUID is Apple's standard plugin factory UUID — do not change -->
+        <key>F543DA23-4B17-45B2-B5FF-DCE2E00E55C5</key>
+        <string>AudioProfilesDriver_Create</string>
+    </dict>
+
+    <key>CFPlugInTypes</key>
+    <dict>
+        <!-- kAudioServerPlugInTypeUUID -->
+        <key>443ABAB8-E7B3-491A-B985-BEB9187030DB</key>
+        <array>
+            <string>F543DA23-4B17-45B2-B5FF-DCE2E00E55C5</string>
+        </array>
+    </dict>
+
+    <!-- AudioServerPlugIn key — registers with the HAL -->
+    <key>AudioServerPlugIn</key>
+    <dict>
+        <key>Manufacturer</key>
+        <string>AudioProfiles</string>
+        <key>ResourceBundle</key>
+        <string></string>
+    </dict>
+
+    <!-- Required: allows the virtual device to be used by sandboxed processes -->
+    <key>sandboxSafe</key>
+    <true/>
+</dict>
+</plist>

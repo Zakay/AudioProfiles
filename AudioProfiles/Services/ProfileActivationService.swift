@@ -67,11 +67,13 @@ class ProfileActivationService: ObservableObject {
 
         // Apply output device using direct service call
         var didSetOutput = false
+        var resolvedOutputDevice: AudioDevice?
         for deviceID in outputList {
             if let device = findDevice(by: deviceID, in: devices, isOutput: true) {
                 if deviceControlService.setDefaultOutputDevice(device) {
                     AppLogger.info("Set output device: \(device.name)")
                     activeOutputDeviceName = device.name
+                    resolvedOutputDevice = device
                     didSetOutput = true
                     break
                 } else {
@@ -101,6 +103,25 @@ class ProfileActivationService: ObservableObject {
         }
         if !didSetInput {
             activeInputDeviceName = deviceControlService.getDefaultInputDevice()?.name
+        }
+
+        // Engage or disengage EQ pipeline based on the resolved output device
+        if let device = resolvedOutputDevice {
+            Task { @MainActor in
+                if let eqSettings = EQStore.shared.activeEQ(for: device.id),
+                   EQInstallationService.shared.isInstalled {
+                    AppLogger.info("Engaging EQ for output device '\(device.name)' during profile activation")
+                    EQEngineService.shared.start(
+                        realDeviceUID: device.id,
+                        settings: eqSettings,
+                        virtualDeviceName: "\(device.name) EQ"
+                    )
+                } else if EQEngineService.shared.isRunning,
+                          EQEngineService.shared.targetDeviceUID != device.id {
+                    AppLogger.info("Stopping EQ: output device changed to '\(device.name)' which has no EQ")
+                    EQEngineService.shared.stopSafe(switchTo: device.id)
+                }
+            }
         }
     }
     

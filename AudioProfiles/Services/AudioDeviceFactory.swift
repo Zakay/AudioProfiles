@@ -46,6 +46,7 @@ class AudioDeviceFactory {
         }
         
         let devices = deviceIDs.compactMap { createAudioDevice(from: $0) }
+            .filter { $0.id != "AudioProfilesEQDevice-UID" }
         return sorted ? devices.sorted { $0.name < $1.name } : devices
     }
     

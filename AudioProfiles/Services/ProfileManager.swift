@@ -135,7 +135,7 @@ class ProfileManager: ObservableObject {
         // After coreaudiod restarts, all devices reset — run the full trigger flow
         AudioDeviceMonitor.shared.serviceRestartedSubject
             .debounce(for: .seconds(1), scheduler: RunLoop.main)
-            .sink { [weak self] in
+            .sink { _ in
                 AppLogger.info("coreaudiod restarted — running full trigger detection flow")
                 ProfileTriggerService.shared.triggerAutoDetection()
             }
