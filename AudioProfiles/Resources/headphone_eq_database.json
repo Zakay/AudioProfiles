@@ -236698,7 +236698,11 @@
       "brand": "Kanto",
       "model": "ORA4",
       "category": "speaker",
+      "type": "powered desktop / bookshelf",
       "source": "Erin's Audio Corner",
+      "mean_spl_db": 87.9,
+      "f3_hz": 50,
+      "f10_hz": 39,
       "fr_hz": [
         20,
         50,
@@ -236729,56 +236733,20 @@
         -1.0,
         -4.0
       ],
+      "eq_bands_hz": [
+        31.5,
+        63,
+        125,
+        250,
+        500,
+        1000,
+        2000,
+        4000,
+        8000,
+        16000
+      ],
       "eq": {
-        "Harman Over-ear 2019": [
-          12.0,
-          5.9,
-          1.2,
-          -0.6,
-          -1.0,
-          0.0,
-          1.0,
-          5.0,
-          1.0,
-          -1.0
-        ],
-        "Harman IEM 2019": [
-          12.0,
-          5.4,
-          0.7,
-          -1.1,
-          -0.5,
-          0.0,
-          0.0,
-          3.0,
-          0.5,
-          0.0
-        ],
-        "PCDP / Extended Treble (2025)": [
-          12.0,
-          5.9,
-          1.2,
-          -0.6,
-          -1.0,
-          0.0,
-          1.5,
-          5.5,
-          3.0,
-          2.5
-        ],
-        "Diffuse Field": [
-          12.0,
-          1.9,
-          -0.3,
-          -0.1,
-          -0.5,
-          0.0,
-          0.5,
-          4.5,
-          -1.0,
-          -2.0
-        ],
-        "Flat": [
+        "Flat (Studio Reference)": [
           12.0,
           1.9,
           -0.3,
@@ -236790,18 +236758,73 @@
           -2.0,
           1.0
         ],
-        "Warm / Relaxed": [
+        "Harman Speaker (2017)": [
           12.0,
-          6.4,
-          2.2,
-          0.9,
-          0.0,
-          0.0,
+          3.9,
+          0.7,
+          0.4,
           -0.5,
-          2.0,
+          0.0,
+          -2.5,
+          -3.5,
+          -5.5,
+          -5.0
+        ],
+        "Nearfield Desktop": [
+          12.0,
+          3.4,
+          0.2,
+          -0.1,
+          -0.5,
+          0.0,
           -1.5,
-          -2.5
+          -1.5,
+          -3.0,
+          -2.0
+        ],
+        "Hi-Fi / Warm": [
+          12.0,
+          4.9,
+          1.2,
+          0.4,
+          -0.5,
+          0.0,
+          -3.0,
+          -4.0,
+          -5.5,
+          -4.0
+        ],
+        "Broadcast / Voice": [
+          12.0,
+          1.9,
+          -0.3,
+          -0.1,
+          -0.5,
+          0.0,
+          -2.0,
+          -3.0,
+          -4.0,
+          -3.0
+        ],
+        "With Subwoofer": [
+          11.7,
+          -1.1,
+          -1.3,
+          -0.1,
+          -0.5,
+          0.0,
+          -2.5,
+          -3.0,
+          -4.5,
+          -3.0
         ]
+      },
+      "recommendation": {
+        "best_overall": "Nearfield Desktop",
+        "audiophile_hifi": "Harman Speaker (2017)",
+        "critical_work": "Flat (Studio Reference)",
+        "with_subwoofer": "With Subwoofer",
+        "notes": "The ORA4 measures with a slight +2dB presence rise from 2-8kHz relative to its 1kHz reference, which can cause brightness/edge in upper-mids at close listening distances. Nearfield Desktop is recommended as default."
       }
     },
     {
