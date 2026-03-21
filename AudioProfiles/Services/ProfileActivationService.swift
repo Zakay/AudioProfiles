@@ -30,6 +30,16 @@ class ProfileActivationService: ObservableObject {
         applyProfile(profile)
         AppLogger.info("Activated profile: \(profile.name)")
     }
+
+    /// Set the active profile and mode without applying device changes.
+    /// Use during init when Core Audio calls must be avoided on the main thread.
+    func setActiveProfileWithoutApplying(_ profile: Profile, restoredMode: ProfileMode? = nil) {
+        activeProfile = profile
+        let targetMode = restoredMode ?? profile.preferredMode
+        if activeMode != targetMode {
+            activeMode = targetMode
+        }
+    }
     
     func deactivateProfile() {
         activeProfile = nil

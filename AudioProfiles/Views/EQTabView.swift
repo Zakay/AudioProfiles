@@ -44,8 +44,15 @@ struct EQTabView: View {
         .padding(.top, 8)
         .onAppear { refreshDevices() }
         .onReceive(AudioDeviceMonitor.shared.deviceChangesSubject) { devices in
-            outputDevices = devices.filter(\.isOutput).sorted { $0.name < $1.name }
-            autoSelectDevice()
+            let filtered = devices.filter(\.isOutput).sorted { $0.name < $1.name }
+            outputDevices = filtered
+            // Resolve default device off main thread, then auto-select
+            DispatchQueue.global(qos: .userInitiated).async {
+                let defaultUID = AudioDeviceControlService().getDefaultOutputDevice()?.id
+                DispatchQueue.main.async {
+                    autoSelectDevice(defaultDeviceUID: defaultUID)
+                }
+            }
         }
         .onReceive(AudioDeviceMonitor.shared.serviceRestartedSubject) {
             // coreaudiod restarted — clear stale device list, wait for fresh device notification
@@ -84,6 +91,7 @@ struct EQTabView: View {
                 Button {
                     guard let id = selectedDeviceID else { return }
                     eqStore.setSettings(.flat, for: id)
+                    eqStore.setMode(.custom, for: id)
                     if EQEngineService.shared.isRunning,
                        EQEngineService.shared.targetDeviceUID == id {
                         EQEngineService.shared.stopSafe(switchTo: id)
@@ -115,15 +123,16 @@ struct EQTabView: View {
             let devices = AudioDeviceFactory.getCurrentDevices()
                 .filter(\.isOutput)
                 .sorted { $0.name < $1.name }
+            let defaultUID = AudioDeviceControlService().getDefaultOutputDevice()?.id
             DispatchQueue.main.async {
                 outputDevices = devices
-                autoSelectDevice()
+                autoSelectDevice(defaultDeviceUID: defaultUID)
             }
         }
     }
 
-    /// Pick the best device without calling Core Audio on the main thread.
-    private func autoSelectDevice() {
+    /// Pick the best device. `defaultDeviceUID` is resolved off the main thread.
+    private func autoSelectDevice(defaultDeviceUID: String? = nil) {
         guard !outputDevices.isEmpty else { return }
         // If current selection is still valid, keep it
         if let id = selectedDeviceID, outputDevices.contains(where: { $0.id == id }) {
@@ -137,7 +146,12 @@ struct EQTabView: View {
             selectedDeviceID = targetUID
             return
         }
-        // Fall back to first available device (avoids synchronous Core Audio call)
+        // Use the system default output if available
+        if let uid = defaultDeviceUID, outputDevices.contains(where: { $0.id == uid }) {
+            selectedDeviceID = uid
+            return
+        }
+        // Fall back to first available device
         selectedDeviceID = outputDevices.first?.id
     }
 

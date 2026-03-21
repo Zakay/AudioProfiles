@@ -44,11 +44,17 @@ final class EQEngineService: ObservableObject {
     private var eqRenderRef:    EQRenderRef?
     private var inputCaptureRef: InputCaptureRef?
 
+    /// Volume sync: mirrors virtual device volume to real device
+    private var virtualDeviceID: AudioObjectID?
+    private var realDeviceID: AudioObjectID?
+    private var volumeListenerBlock: AudioObjectPropertyListenerBlock?
+
     private var cancellables = Set<AnyCancellable>()
 
     // MARK: - Init
     private init() {
         gRenderStopped.initialize(to: 0)
+        gGeneration.initialize(to: 0)
 
         // Register a DIRECT Core Audio property listener for coreaudiod restart.
         // This fires on the audio thread IMMEDIATELY — no async main-thread hop —
@@ -97,7 +103,11 @@ final class EQEngineService: ObservableObject {
     ) {
         stopEngineOnly()
 
-        AppLogger.error("[EQ-DIAG] EQEngineService.start() called: '\(virtualDeviceName)' → real=\(realDeviceUID)")
+        // Increment generation so stale callbacks from previous pipeline are ignored
+        gGeneration.pointee &+= 1
+        let gen = gGeneration.pointee
+
+        AppLogger.error("[EQ-DIAG] EQEngineService.start() called: '\(virtualDeviceName)' → real=\(realDeviceUID) gen=\(gen)")
 
         // 1. Find and show the virtual device
         guard let virtualDevice = EQDriverService.shared.findAudioDevice() else {
@@ -146,7 +156,7 @@ final class EQEngineService: ObservableObject {
             let output = try createOutputAUHAL(device: realObjectID, format: outputFormat)
 
             // 7. Set up input capture callback (fires when input AUHAL has data)
-            let inputCapRef = InputCaptureRef(unit: input, buffer: capBuf)
+            let inputCapRef = InputCaptureRef(unit: input, buffer: capBuf, generation: gen)
             self.inputCaptureRef = inputCapRef
 
             var inputCallbackStruct = AURenderCallbackStruct(
@@ -159,7 +169,7 @@ final class EQEngineService: ObservableObject {
             guard status == noErr else { throw AUError("Set input capture callback", status) }
 
             // 8. Wire output render chain: output ← EQ ← captureBuffer
-            let eqRef = EQRenderRef(eqUnit: eq, buffer: capBuf)
+            let eqRef = EQRenderRef(eqUnit: eq, buffer: capBuf, generation: gen)
             self.eqRenderRef = eqRef
 
             var outputCallbackStruct = AURenderCallbackStruct(
@@ -232,7 +242,12 @@ final class EQEngineService: ObservableObject {
         }
 
         self.targetDeviceUID = realDeviceUID
+        self.virtualDeviceID = virtualObjectID
+        self.realDeviceID = realObjectID
         self.isRunning = true
+
+        // Sync volume: copy current real device volume to virtual, then listen for changes
+        startVolumeSync(virtualID: virtualObjectID, realID: realObjectID)
 
         AppLogger.error("[EQ-DIAG] pipeline running ✓")
     }
@@ -242,6 +257,15 @@ final class EQEngineService: ObservableObject {
     func stopSafe(switchTo realDeviceUID: String) {
         AppLogger.info("EQEngineService: stopping, switching back to \(realDeviceUID)")
 
+        // Capture the current volume from the virtual device before tearing down,
+        // so we can restore it on the real device (user expects volume to stay the same).
+        let restoreVolume: Float32?
+        if let vID = virtualDeviceID {
+            restoreVolume = getDeviceVolume(vID)
+        } else {
+            restoreVolume = nil
+        }
+
         stopEngineOnly()
         EQDriverService.shared.hide()
 
@@ -250,12 +274,18 @@ final class EQEngineService: ObservableObject {
 
         // Restore default output on a background queue — Core Audio calls can hang
         // during coreaudiod restart if called on the main thread.
-        DispatchQueue.global(qos: .userInitiated).async {
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
             let devices = AudioDeviceFactory.getCurrentDevices()
             if let realDevice = devices.first(where: { $0.id == realDeviceUID && $0.isOutput }) {
                 let controlService = AudioDeviceControlService()
                 let ok = controlService.setDefaultOutputDevice(realDevice)
                 AppLogger.info("EQEngineService: restored default output to '\(realDevice.name)' → \(ok)")
+
+                // Restore the volume the user had set while EQ was active
+                if let vol = restoreVolume, let realID = translateUID(realDeviceUID) {
+                    setDeviceVolume(realID, volume: vol)
+                    AppLogger.info("EQEngineService: restored volume to \(String(format: "%.0f%%", vol * 100))")
+                }
             }
         }
     }
@@ -303,10 +333,83 @@ final class EQEngineService: ObservableObject {
         inputAU  = nil
         eqAU     = nil
 
-        // IMPORTANT: Do NOT nil eqRenderRef, inputCaptureRef, or captureBuffer here.
+        // Do NOT nil eqRenderRef, inputCaptureRef, or captureBuffer here.
         // An IO thread may still be mid-callback holding a raw pointer to them.
+        // The generation counter ensures stale callbacks return immediately.
         // They will be replaced when the next start() creates new ones,
         // and the old ones will be deallocated naturally by ARC at that point.
+
+        stopVolumeSync()
+    }
+
+    // MARK: - Private: Volume Sync
+
+    /// Start mirroring volume changes from the virtual device to the real device.
+    /// When the user adjusts system volume (which targets the virtual device),
+    /// we copy that volume to the real device so audio output level matches.
+    private func startVolumeSync(virtualID: AudioObjectID, realID: AudioObjectID) {
+        stopVolumeSync()
+
+        // Set real device to max so the virtual device's volume has full range
+        setDeviceVolume(realID, volume: 1.0)
+
+        // Listen for volume changes on the virtual device
+        var volumeAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwareServiceDeviceProperty_VirtualMainVolume,
+            mScope: kAudioDevicePropertyScopeOutput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+
+        let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            guard let self = self else { return }
+            let vol = self.getDeviceVolume(virtualID)
+            self.setDeviceVolume(realID, volume: vol)
+        }
+        self.volumeListenerBlock = listener
+
+        let status = AudioObjectAddPropertyListenerBlock(virtualID, &volumeAddr, DispatchQueue.main, listener)
+        if status != noErr {
+            AppLogger.error("EQEngineService: failed to add volume listener: \(status)")
+        } else {
+            AppLogger.info("EQEngineService: volume sync active")
+        }
+    }
+
+    private func stopVolumeSync() {
+        guard let vID = virtualDeviceID, let listener = volumeListenerBlock else { return }
+
+        var volumeAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwareServiceDeviceProperty_VirtualMainVolume,
+            mScope: kAudioDevicePropertyScopeOutput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        AudioObjectRemovePropertyListenerBlock(vID, &volumeAddr, DispatchQueue.main, listener)
+        self.volumeListenerBlock = nil
+        self.virtualDeviceID = nil
+        self.realDeviceID = nil
+    }
+
+    private func getDeviceVolume(_ deviceID: AudioObjectID) -> Float32 {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwareServiceDeviceProperty_VirtualMainVolume,
+            mScope: kAudioDevicePropertyScopeOutput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var volume: Float32 = 1.0
+        var size = UInt32(MemoryLayout<Float32>.size)
+        AudioObjectGetPropertyData(deviceID, &addr, 0, nil, &size, &volume)
+        return volume
+    }
+
+    private func setDeviceVolume(_ deviceID: AudioObjectID, volume: Float32) {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwareServiceDeviceProperty_VirtualMainVolume,
+            mScope: kAudioDevicePropertyScopeOutput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var vol = volume
+        AudioObjectSetPropertyData(deviceID, &addr, 0, nil,
+                                    UInt32(MemoryLayout<Float32>.size), &vol)
     }
 
     // MARK: - Private: Create Audio Units
@@ -548,6 +651,7 @@ private func inputCaptureCallback(
 ) -> OSStatus {
     if gRenderStopped.pointee != 0 { return noErr }
     let ref = Unmanaged<InputCaptureRef>.fromOpaque(inRefCon).takeUnretainedValue()
+    if ref.generation != gGeneration.pointee { return noErr }
 
     // Prepare interleaved buffer list for the captured data
     let bufferList = ref.buffer.prepareForCapture(frameCount: inNumberFrames)
@@ -583,6 +687,13 @@ private func outputRenderCallback(
         return noErr
     }
     let ref = Unmanaged<EQRenderRef>.fromOpaque(inRefCon).takeUnretainedValue()
+    if ref.generation != gGeneration.pointee {
+        if let ioData = ioData {
+            let ablPtr = UnsafeMutableAudioBufferListPointer(ioData)
+            for buf in ablPtr { if let data = buf.mData { memset(data, 0, Int(buf.mDataByteSize)) } }
+        }
+        return noErr
+    }
 
     return AudioUnitRender(ref.eqUnit, ioActionFlags, inTimeStamp, 0, inNumberFrames, ioData!)
 }
@@ -608,6 +719,11 @@ private func eqInputRenderCallback(
     }
     let ref = Unmanaged<EQRenderRef>.fromOpaque(inRefCon).takeUnretainedValue()
     guard let ioData = ioData else { return kAudioUnitErr_InvalidParameter }
+    if ref.generation != gGeneration.pointee {
+        let ablPtr = UnsafeMutableAudioBufferListPointer(ioData)
+        for buf in ablPtr { if let data = buf.mData { memset(data, 0, Int(buf.mDataByteSize)) } }
+        return noErr
+    }
 
     ref.buffer.read(into: ioData, frameCount: inNumberFrames)
     return noErr
@@ -754,21 +870,28 @@ private final class CaptureBuffer {
 /// an IO thread is mid-callback.
 private let gRenderStopped = UnsafeMutablePointer<Int32>.allocate(capacity: 1)
 
+/// Generation counter — incremented on every start(). Callbacks check this to detect stale refs.
+private let gGeneration = UnsafeMutablePointer<Int32>.allocate(capacity: 1)
+
 private final class InputCaptureRef {
     let unit: AudioUnit
     let buffer: CaptureBuffer
-    init(unit: AudioUnit, buffer: CaptureBuffer) {
+    let generation: Int32
+    init(unit: AudioUnit, buffer: CaptureBuffer, generation: Int32) {
         self.unit = unit
         self.buffer = buffer
+        self.generation = generation
     }
 }
 
 private final class EQRenderRef {
     let eqUnit: AudioUnit
     let buffer: CaptureBuffer
-    init(eqUnit: AudioUnit, buffer: CaptureBuffer) {
+    let generation: Int32
+    init(eqUnit: AudioUnit, buffer: CaptureBuffer, generation: Int32) {
         self.eqUnit = eqUnit
         self.buffer = buffer
+        self.generation = generation
     }
 }
 

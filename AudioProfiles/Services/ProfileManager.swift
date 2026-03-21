@@ -85,34 +85,45 @@ class ProfileManager: ObservableObject {
         // Load profiles from UserDefaults (no Core Audio calls — safe during init)
         loadProfiles()
 
-        // Set System Default immediately so UI has state before trigger detection runs
+        // Set System Default immediately so UI has state before trigger detection runs.
+        // Use setActiveProfileWithoutApplying to avoid Core Audio calls on main thread
+        // during init — the deferred block below will apply the right profile.
         if !profiles.isEmpty {
             if let systemDefault = profiles.first(where: { $0.name == "System Default" }) {
-                activationService.activateProfile(systemDefault, restoredMode: getSavedMode(for: systemDefault.id))
+                activationService.setActiveProfileWithoutApplying(systemDefault, restoredMode: getSavedMode(for: systemDefault.id))
             } else {
                 let first = profiles.first!
-                activationService.activateProfile(first, restoredMode: getSavedMode(for: first.id))
+                activationService.setActiveProfileWithoutApplying(first, restoredMode: getSavedMode(for: first.id))
             }
         }
 
         // Defer trigger detection to after init completes — ProfileTriggerService
         // accesses ProfileManager.shared, which deadlocks if called during init.
+        // We subscribe to AudioDeviceMonitor's first device emission rather than
+        // querying Core Audio directly — this avoids hanging on main thread if
+        // coreaudiod is restarting, and avoids deadlocking with background queries.
         DispatchQueue.main.async { [self] in
-            let currentDevices = AudioDeviceFactory.getCurrentDevices()
-            AudioDeviceHistoryService.shared.updateDeviceHistory(with: currentDevices)
+            // Subscribe to the first device list from AudioDeviceMonitor to initialize
+            AudioDeviceMonitor.shared.deviceChangesSubject
+                .first()
+                .sink { [weak self] devices in
+                    guard let self = self else { return }
+                    AudioDeviceHistoryService.shared.updateDeviceHistory(with: devices)
 
-            // Run trigger detection to pick the right profile based on connected devices
-            ProfileTriggerService.shared.triggerAutoDetection()
+                    // Run trigger detection to pick the right profile based on connected devices
+                    ProfileTriggerService.shared.triggerAutoDetection()
 
-            // If no profile was activated by triggers, fall back to System Default
-            if activeProfile == nil && !profiles.isEmpty {
-                if let systemDefault = profiles.first(where: { $0.name == "System Default" }) {
-                    AppLogger.info("No trigger matched — activating System Default profile")
-                    activateProfile(with: systemDefault.id)
-                } else {
-                    activateProfile(with: profiles.first!.id)
+                    // If no profile was activated by triggers, fall back to System Default
+                    if self.activeProfile == nil && !self.profiles.isEmpty {
+                        if let systemDefault = self.profiles.first(where: { $0.name == "System Default" }) {
+                            AppLogger.info("No trigger matched — activating System Default profile")
+                            self.activateProfile(with: systemDefault.id)
+                        } else {
+                            self.activateProfile(with: self.profiles.first!.id)
+                        }
+                    }
                 }
-            }
+                .store(in: &self.cancellables)
         }
 
         // Set up cleanup timer for expired devices

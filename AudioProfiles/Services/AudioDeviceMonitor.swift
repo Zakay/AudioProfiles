@@ -42,11 +42,18 @@ class AudioDeviceMonitor: ObservableObject {
         setupServiceRestartMonitoring()
         setupDeviceMonitoring()
 
-        // Initialize with current devices
-        let currentDevices = AudioDeviceFactory.getCurrentDevices()
-        lastKnownDeviceIDs = Set(currentDevices.map { $0.id })
-
-        AppLogger.info("AudioDeviceMonitor initialized with \(currentDevices.count) devices")
+        // Query current devices on background queue to avoid blocking main thread
+        // if coreaudiod is slow/restarting. Publishes the initial device list through
+        // the same deviceChangesSubject so subscribers get it automatically.
+        audioQueue.async { [weak self] in
+            let currentDevices = AudioDeviceFactory.getCurrentDevices()
+            guard let self = self else { return }
+            self.lastKnownDeviceIDs = Set(currentDevices.map { $0.id })
+            AppLogger.info("AudioDeviceMonitor initialized with \(currentDevices.count) devices")
+            DispatchQueue.main.async {
+                self.deviceChangesSubject.send(currentDevices)
+            }
+        }
     }
 
     private func setupDeviceMonitoring() {

@@ -181,22 +181,25 @@ struct EQEditorView: View {
         if EQEngineService.shared.isRunning,
            EQEngineService.shared.targetDeviceUID == deviceUID {
             Task { @MainActor in EQEngineService.shared.updateSettings(newSettings) }
-        } else if !newSettings.isFlat && !EQEngineService.shared.isRunning && isCurrentOutputDevice {
-            engageEQ(settings: newSettings)
+        } else if !newSettings.isFlat && !EQEngineService.shared.isRunning {
+            // Check default output device off main thread to avoid Core Audio hangs
+            let uid = deviceUID
+            let name = deviceName
+            DispatchQueue.global(qos: .userInitiated).async {
+                let isDefault = AudioDeviceControlService().getDefaultOutputDevice()?.id == uid
+                if isDefault {
+                    DispatchQueue.main.async {
+                        guard EQInstallationService.shared.isInstalled else { return }
+                        guard !EQEngineService.shared.isRunning else { return }
+                        EQEngineService.shared.start(
+                            realDeviceUID: uid,
+                            settings: newSettings,
+                            virtualDeviceName: "\(name) EQ"
+                        )
+                    }
+                }
+            }
         }
-    }
-
-    private var isCurrentOutputDevice: Bool {
-        AudioDeviceControlService().getDefaultOutputDevice()?.id == deviceUID
-    }
-
-    private func engageEQ(settings: EQSettings) {
-        guard EQInstallationService.shared.isInstalled else { return }
-        EQEngineService.shared.start(
-            realDeviceUID: deviceUID,
-            settings: settings,
-            virtualDeviceName: "\(deviceName) EQ"
-        )
     }
 
     private func dbLabel(_ gain: Float) -> String {

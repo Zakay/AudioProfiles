@@ -11,11 +11,13 @@ class ProfileValidationService {
     func cleanupInvalidDevices(in profile: Profile) -> Profile {
         var updatedProfile = profile
         
-        // Only remove a device reference if the device is completely unknown (not currently connected *and* not present in device history).
-        // This allows profiles to safely reference temporarily disconnected devices without losing their configuration.
+        // Only remove a device reference if the device is completely unknown to device history.
+        // We intentionally do NOT query Core Audio here because this runs during app startup
+        // on the main thread, and Core Audio can hang if coreaudiod is restarting or unstable.
+        // History alone is sufficient — if we've ever seen a device, keep its references.
+        let history = AudioDeviceHistoryService.shared
         func isDeviceKnown(_ deviceID: String) -> Bool {
-            // Device is known if it is currently connected OR exists in history
-            return deviceFilterService.isDeviceConnected(deviceID) || deviceFilterService.getDevice(by: deviceID) != nil
+            return history.getDevice(by: deviceID) != nil
         }
 
         updatedProfile.triggerDeviceIDs = profile.triggerDeviceIDs.filter { isDeviceKnown($0) }
