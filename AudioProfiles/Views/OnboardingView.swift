@@ -46,50 +46,21 @@ struct OnboardingView: View {
                 }
             }
             
-            // Page indicators
-            HStack(spacing: 12) {
+            // Page indicators — simple dots
+            HStack(spacing: 8) {
                 ForEach(0..<pages.count, id: \.self) { index in
-                    HStack(spacing: 6) {
-                        // Step number
-                        Text("\(index + 1)")
-                            .font(.caption2)
-                            .fontWeight(.semibold)
-                            .foregroundColor(index == currentPage ? .white : .secondary)
-                            .frame(width: 16, height: 16)
-                            .background(
-                                Circle()
-                                    .fill(index == currentPage ? Color.accentColor : Color.secondary.opacity(0.3))
-                            )
-                        
-                        // Step name (only for current page)
-                        if index == currentPage {
-                            Text(pages[index].title)
-                                .font(.caption2)
-                                .fontWeight(.medium)
-                                .foregroundColor(.primary)
-                                .transition(.opacity.combined(with: .scale))
-                        }
-                    }
-                    .animation(.easeInOut(duration: 0.3), value: currentPage)
+                    Circle()
+                        .fill(index == currentPage ? Color.accentColor : Color.secondary.opacity(0.3))
+                        .frame(width: 7, height: 7)
                 }
             }
             .padding(.bottom, 20)
-            
-            // Content
-            TabView(selection: $currentPage) {
-                ForEach(0..<pages.count, id: \.self) { index in
-                    OnboardingPageView(page: pages[index])
-                        .tag(index)
-                        .id(index) // Force view recreation when page changes
-                }
-            }
-            .animation(.easeInOut, value: currentPage)
-            .onChange(of: currentPage) {
-                // Small delay to ensure smooth transitions
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                    // This will trigger onAppear for the new page
-                }
-            }
+
+            // Content — no TabView to avoid system tab chrome
+            OnboardingPageView(page: pages[currentPage])
+                .id(currentPage)
+                .transition(.opacity)
+                .animation(.easeInOut(duration: 0.3), value: currentPage)
             
             // Bottom controls
             VStack(spacing: 16) {
@@ -174,6 +145,8 @@ struct OnboardingPageView: View {
                     ProfilesVisual()
                 case .smartSwitching:
                     SmartSwitchingVisual()
+                case .equalizer:
+                    EqualizerVisual()
                 case .gettingStarted:
                     GettingStartedVisual()
                 }
@@ -430,6 +403,226 @@ struct SmartSwitchingVisual: View {
     }
 }
 
+struct EqualizerVisual: View {
+    @State private var viewDidAppear = false
+
+    /// Load a real headphone from the preset database for the demo
+    private var demoData: (headphone: EQPresetHeadphone, target: String, settings: EQSettings)? {
+        let service = EQPresetService.shared
+        // Try a well-known headphone
+        let candidates = ["Sony WH-1000XM5", "Sony WH-1000XM4", "AirPods Max", "AirPods Pro"]
+        for name in candidates {
+            if let hp = service.headphone(named: name),
+               let target = hp.targets.first,
+               let settings = service.toEQSettings(headphone: hp, target: target) {
+                return (hp, target, settings)
+            }
+        }
+        return nil
+    }
+
+    var body: some View {
+        VStack(spacing: 16) {
+            if let data = demoData {
+                // Real EQ graph using Canvas
+                OnboardingEQGraph(
+                    settings: data.settings,
+                    frequencyResponse: data.headphone.frequencyResponse,
+                    animated: viewDidAppear
+                )
+                .frame(height: 180)
+                .frame(maxWidth: 440)
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .opacity(viewDidAppear ? 1 : 0)
+                .animation(.easeIn(duration: 0.5), value: viewDidAppear)
+
+                // Preset pill
+                HStack(spacing: 6) {
+                    Image(systemName: "headphones")
+                        .font(.caption)
+                        .foregroundColor(.blue)
+                    Text(data.headphone.name)
+                        .font(.caption)
+                        .fontWeight(.medium)
+                    Text("·")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Text(data.target)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Color(NSColor.controlBackgroundColor))
+                .cornerRadius(8)
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.gray.opacity(0.3), lineWidth: 0.5))
+                .opacity(viewDidAppear ? 1 : 0)
+                .animation(.easeIn(duration: 0.5).delay(0.2), value: viewDidAppear)
+
+                // Stats
+                HStack(spacing: 16) {
+                    Label("4,800+ headphones", systemImage: "headphones")
+                    Label("6 target curves", systemImage: "waveform")
+                    Label("10-band EQ", systemImage: "slider.horizontal.3")
+                }
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .opacity(viewDidAppear ? 1 : 0)
+                .animation(.easeIn(duration: 0.5).delay(0.4), value: viewDidAppear)
+            }
+        }
+        .onAppear {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                viewDidAppear = true
+            }
+        }
+        .onDisappear {
+            viewDidAppear = false
+        }
+    }
+}
+
+/// Lightweight EQ graph for onboarding — draws EQ curve, band dots, and optional FR overlay
+private struct OnboardingEQGraph: View {
+    let settings: EQSettings
+    let frequencyResponse: [(hz: Float, db: Float)]?
+    let animated: Bool
+
+    private let minFreq: Double = 20
+    private let maxFreq: Double = 20_000
+    private let displayMin: Double = -13
+    private let displayMax: Double = 13
+    private let sampleCount = 200
+
+    var body: some View {
+        Canvas { ctx, size in
+            let inset = (left: 30.0, right: 8.0, top: 8.0, bottom: 18.0)
+            let area = CGRect(
+                x: inset.left, y: inset.top,
+                width: size.width - inset.left - inset.right,
+                height: size.height - inset.top - inset.bottom
+            )
+            drawGrid(ctx, area: area)
+            drawFreqLabels(ctx, area: area)
+            drawDBLabels(ctx, area: area)
+            if animated {
+                if let fr = frequencyResponse {
+                    drawFR(ctx, area: area, response: fr)
+                }
+                drawCompositeCurve(ctx, area: area)
+                drawDots(ctx, area: area)
+            }
+        }
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color(white: 0.1)))
+    }
+
+    private func freqToX(_ freq: Double, area: CGRect) -> CGFloat {
+        area.minX + CGFloat(log10(freq / minFreq) / log10(maxFreq / minFreq)) * area.width
+    }
+    private func gainToY(_ gain: Double, area: CGRect) -> CGFloat {
+        let n = (gain - displayMin) / (displayMax - displayMin)
+        return area.maxY - CGFloat(n) * area.height
+    }
+
+    private func drawGrid(_ ctx: GraphicsContext, area: CGRect) {
+        let gridColor = Color.white.opacity(0.08)
+        let zeroColor = Color.white.opacity(0.2)
+        for db in [-12.0, -6, 0, 6, 12] as [Double] {
+            let y = gainToY(db, area: area)
+            var p = Path(); p.move(to: CGPoint(x: area.minX, y: y)); p.addLine(to: CGPoint(x: area.maxX, y: y))
+            ctx.stroke(p, with: .color(db == 0 ? zeroColor : gridColor), lineWidth: 0.5)
+        }
+        for freq in [32.0, 64, 125, 250, 500, 1000, 2000, 4000, 8000, 16000] {
+            let x = freqToX(freq, area: area)
+            var p = Path(); p.move(to: CGPoint(x: x, y: area.minY)); p.addLine(to: CGPoint(x: x, y: area.maxY))
+            ctx.stroke(p, with: .color(gridColor), lineWidth: 0.5)
+        }
+    }
+
+    private func drawFreqLabels(_ ctx: GraphicsContext, area: CGRect) {
+        for (freq, label) in [(32.0, "32"), (125, "125"), (500, "500"), (2000, "2k"), (8000, "8k")] {
+            ctx.draw(
+                Text(label).font(.system(size: 7)).foregroundColor(Color.white.opacity(0.3)),
+                at: CGPoint(x: freqToX(freq, area: area), y: area.maxY + 10), anchor: .center
+            )
+        }
+    }
+
+    private func drawDBLabels(_ ctx: GraphicsContext, area: CGRect) {
+        for (db, label) in [(-12.0, "-12"), (0, "0"), (12, "+12")] as [(Double, String)] {
+            ctx.draw(
+                Text(label).font(.system(size: 7)).foregroundColor(Color.white.opacity(0.3)),
+                at: CGPoint(x: area.minX - 4, y: gainToY(db, area: area)), anchor: .trailing
+            )
+        }
+    }
+
+    private func drawFR(_ ctx: GraphicsContext, area: CGRect, response: [(hz: Float, db: Float)]) {
+        let pts: [CGPoint] = response.compactMap { p in
+            let f = Double(p.hz)
+            guard f >= minFreq && f <= maxFreq else { return nil }
+            return CGPoint(x: freqToX(f, area: area),
+                           y: gainToY(max(displayMin, min(displayMax, Double(p.db))), area: area))
+        }
+        guard pts.count >= 2 else { return }
+        var path = Path(); path.move(to: pts[0])
+        for i in 1..<pts.count { path.addLine(to: pts[i]) }
+        let frColor = Color(hue: 0.08, saturation: 0.7, brightness: 0.95)
+        ctx.stroke(path, with: .color(frColor.opacity(0.45)),
+                   style: StrokeStyle(lineWidth: 1.2, dash: [4, 3]))
+    }
+
+    private func drawCompositeCurve(_ ctx: GraphicsContext, area: CGRect) {
+        let zeroY = gainToY(0, area: area)
+        let pts: [CGPoint] = (0...sampleCount).map { s in
+            let t = Double(s) / Double(sampleCount)
+            let freq = minFreq * pow(maxFreq / minFreq, t)
+            var gain = Double(settings.preamp)
+            for (i, band) in settings.bands.enumerated() {
+                gain += bandGain(band: band, bandIndex: i, at: freq)
+            }
+            gain = max(displayMin, min(displayMax, gain))
+            return CGPoint(x: freqToX(freq, area: area), y: gainToY(gain, area: area))
+        }
+        // Fill
+        var fill = Path(); fill.move(to: CGPoint(x: pts[0].x, y: zeroY))
+        pts.forEach { fill.addLine(to: $0) }
+        fill.addLine(to: CGPoint(x: pts.last!.x, y: zeroY)); fill.closeSubpath()
+        ctx.fill(fill, with: .color(Color.white.opacity(0.06)))
+        // Stroke
+        var stroke = Path(); stroke.move(to: pts[0])
+        pts.dropFirst().forEach { stroke.addLine(to: $0) }
+        ctx.stroke(stroke, with: .color(Color.white.opacity(0.85)), lineWidth: 1.5)
+    }
+
+    private func drawDots(_ ctx: GraphicsContext, area: CGRect) {
+        for (i, band) in settings.bands.enumerated() {
+            let x = freqToX(Double(band.frequency), area: area)
+            let y = gainToY(Double(band.gain), area: area)
+            let color = EQColors.color(for: i)
+            let dot = Path(ellipseIn: CGRect(x: x - 5, y: y - 5, width: 10, height: 10))
+            ctx.fill(dot, with: .color(color.opacity(0.85)))
+            ctx.stroke(dot, with: .color(.white.opacity(0.5)), lineWidth: 1)
+        }
+    }
+
+    private func bandGain(band: EQBand, bandIndex: Int, at freq: Double) -> Double {
+        let g = Double(band.gain)
+        guard abs(g) >= 0.01 else { return 0 }
+        let f0 = Double(band.frequency)
+        let bw = max(Double(band.bandwidth), 0.1)
+        let logRatio = log2(freq / f0)
+        if bandIndex == 0 {
+            return g * (1.0 - 1.0 / (1.0 + exp(-logRatio * 2.5 / bw)))
+        } else if bandIndex == settings.bands.count - 1 {
+            return g / (1.0 + exp(-logRatio * 2.5 / bw))
+        } else {
+            let sigma = bw / 2.0
+            return g * exp(-0.5 * pow(logRatio / sigma, 2))
+        }
+    }
+}
+
 struct GettingStartedVisual: View {
     var body: some View {
         VStack(spacing: 20) {
@@ -482,9 +675,9 @@ struct OnboardingPage {
     let description: String
     
     enum PageType {
-        case welcome, profiles, smartSwitching, gettingStarted
+        case welcome, profiles, smartSwitching, equalizer, gettingStarted
     }
-    
+
     static let allPages = [
         OnboardingPage(
             type: .welcome,
@@ -500,6 +693,11 @@ struct OnboardingPage {
             type: .smartSwitching,
             title: "Smart Device Switching",
             description: "When you connect headphones, dock your laptop, or plug in external speakers, AudioProfiles automatically activates the right profile for that setup."
+        ),
+        OnboardingPage(
+            type: .equalizer,
+            title: "Per-Device Equalizer",
+            description: "Fine-tune your sound with a built-in 10-band EQ. Choose from 4,800+ headphone presets with calibrated target curves, or create your own custom EQ. Settings are saved per device."
         ),
         OnboardingPage(
             type: .gettingStarted,
