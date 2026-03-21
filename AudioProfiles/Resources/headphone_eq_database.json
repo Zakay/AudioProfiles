@@ -1,6 +1,6 @@
 {
   "metadata": {
-    "total_headphones": 4859,
+    "total_headphones": 4860,
     "fr_hz": [
       20,
       50,
@@ -37,7 +37,7 @@
       "Flat",
       "Warm / Relaxed"
     ],
-    "eq_note": "EQ values in dB, capped \u00b112 dB. Apply as boost/cut per band. All values = target_curve - measured_response.",
+    "eq_note": "EQ values in dB, capped ±12 dB. Apply as boost/cut per band. All values = target_curve - measured_response.",
     "source": "AutoEQ dataset by jaakkopasanen (github.com/jaakkopasanen/AutoEq)"
   },
   "headphones": [
@@ -57984,8 +57984,8 @@
       }
     },
     {
-      "name": "A\u00fcR Audio Aure",
-      "brand": "A\u00fcR",
+      "name": "AüR Audio Aure",
+      "brand": "AüR",
       "model": "Audio Aure",
       "category": "in-ear",
       "source": "Kazi",
@@ -84846,9 +84846,9 @@
       }
     },
     {
-      "name": "Bose QuietComfort 35 II Gaming Headset\u200b",
+      "name": "Bose QuietComfort 35 II Gaming Headset​",
       "brand": "Bose",
-      "model": "QuietComfort 35 II Gaming Headset\u200b",
+      "model": "QuietComfort 35 II Gaming Headset​",
       "category": "over-ear",
       "source": "Rtings",
       "fr_hz": [
@@ -93060,8 +93060,8 @@
       }
     },
     {
-      "name": "B\u00d6HM B-66",
-      "brand": "B\u00d6HM",
+      "name": "BÖHM B-66",
+      "brand": "BÖHM",
       "model": "B-66",
       "category": "over-ear",
       "source": "Rtings",
@@ -174867,9 +174867,9 @@
       }
     },
     {
-      "name": "Gaudio T\u00f6di",
+      "name": "Gaudio Tödi",
       "brand": "Gaudio",
-      "model": "T\u00f6di",
+      "model": "Tödi",
       "category": "in-ear",
       "source": "ToneDeafMonk",
       "fr_hz": [
@@ -236694,6 +236694,117 @@
       }
     },
     {
+      "name": "Kanto ORA4",
+      "brand": "Kanto",
+      "model": "ORA4",
+      "category": "speaker",
+      "source": "Erin's Audio Corner",
+      "fr_hz": [
+        20,
+        50,
+        100,
+        200,
+        500,
+        1000,
+        2000,
+        5000,
+        8000,
+        10000,
+        12000,
+        16000,
+        20000
+      ],
+      "fr_db": [
+        -32.0,
+        -3.1,
+        0.5,
+        0.0,
+        0.5,
+        0.0,
+        2.0,
+        2.0,
+        2.0,
+        1.0,
+        0.0,
+        -1.0,
+        -4.0
+      ],
+      "eq": {
+        "Harman Over-ear 2019": [
+          12.0,
+          5.9,
+          1.2,
+          -0.6,
+          -1.0,
+          0.0,
+          1.0,
+          5.0,
+          1.0,
+          -1.0
+        ],
+        "Harman IEM 2019": [
+          12.0,
+          5.4,
+          0.7,
+          -1.1,
+          -0.5,
+          0.0,
+          0.0,
+          3.0,
+          0.5,
+          0.0
+        ],
+        "PCDP / Extended Treble (2025)": [
+          12.0,
+          5.9,
+          1.2,
+          -0.6,
+          -1.0,
+          0.0,
+          1.5,
+          5.5,
+          3.0,
+          2.5
+        ],
+        "Diffuse Field": [
+          12.0,
+          1.9,
+          -0.3,
+          -0.1,
+          -0.5,
+          0.0,
+          0.5,
+          4.5,
+          -1.0,
+          -2.0
+        ],
+        "Flat": [
+          12.0,
+          1.9,
+          -0.3,
+          -0.1,
+          -0.5,
+          0.0,
+          -2.0,
+          -2.0,
+          -2.0,
+          1.0
+        ],
+        "Warm / Relaxed": [
+          12.0,
+          6.4,
+          2.2,
+          0.9,
+          0.0,
+          0.0,
+          -0.5,
+          2.0,
+          -1.5,
+          -2.5
+        ]
+      }
+    },
+    {
       "name": "KBEAR Believe",
       "brand": "KBEAR",
       "model": "Believe",
@@ -269439,9 +269550,9 @@
       }
     },
     {
-      "name": "Linsoul x THOR Mj\u00f6lnir MKII",
+      "name": "Linsoul x THOR Mjölnir MKII",
       "brand": "Linsoul",
-      "model": "x THOR Mj\u00f6lnir MKII",
+      "model": "x THOR Mjölnir MKII",
       "category": "in-ear",
       "source": "ToneDeafMonk",
       "fr_hz": [
@@ -368340,8 +368451,8 @@
       }
     },
     {
-      "name": "R\u00d8DE NTH-100",
-      "brand": "R\u00d8DE",
+      "name": "RØDE NTH-100",
+      "brand": "RØDE",
       "model": "NTH-100",
       "category": "over-ear",
       "source": "oratory1990",
@@ -368451,8 +368562,8 @@
       }
     },
     {
-      "name": "R\u00d8DE NTH-100 (front dampening removed)",
-      "brand": "R\u00d8DE",
+      "name": "RØDE NTH-100 (front dampening removed)",
+      "brand": "RØDE",
       "model": "NTH-100 (front dampening removed)",
       "category": "over-ear",
       "source": "Kuulokenurkka",
@@ -368562,8 +368673,8 @@
       }
     },
     {
-      "name": "R\u00d8DE NTH-100M",
-      "brand": "R\u00d8DE",
+      "name": "RØDE NTH-100M",
+      "brand": "RØDE",
       "model": "NTH-100M",
       "category": "over-ear",
       "source": "Rtings",
@@ -491106,9 +491217,9 @@
       }
     },
     {
-      "name": "Tripowin Le\u00e1",
+      "name": "Tripowin Leá",
       "brand": "Tripowin",
-      "model": "Le\u00e1",
+      "model": "Leá",
       "category": "in-ear",
       "source": "Super Review",
       "fr_hz": [
@@ -514083,9 +514194,9 @@
       }
     },
     {
-      "name": "Vision Ears Erlk\u00f6nig",
+      "name": "Vision Ears Erlkönig",
       "brand": "Vision Ears",
-      "model": "Erlk\u00f6nig",
+      "model": "Erlkönig",
       "category": "in-ear",
       "source": "oratory1990",
       "fr_hz": [
@@ -514416,9 +514527,9 @@
       }
     },
     {
-      "name": "Vision Ears PH\u00f6NIX",
+      "name": "Vision Ears PHöNIX",
       "brand": "Vision Ears",
-      "model": "PH\u00f6NIX",
+      "model": "PHöNIX",
       "category": "in-ear",
       "source": "HypetheSonics",
       "fr_hz": [
@@ -539058,8 +539169,8 @@
       }
     },
     {
-      "name": "\u00e9coute Audio TH1 (ANC off, Harman curve)",
-      "brand": "\u00e9coute",
+      "name": "écoute Audio TH1 (ANC off, Harman curve)",
+      "brand": "écoute",
       "model": "Audio TH1 (ANC off, Harman curve)",
       "category": "over-ear",
       "source": "Kuulokenurkka",
@@ -539169,8 +539280,8 @@
       }
     },
     {
-      "name": "\u00e9coute Audio TH1 (ANC on, Harman curve)",
-      "brand": "\u00e9coute",
+      "name": "écoute Audio TH1 (ANC on, Harman curve)",
+      "brand": "écoute",
       "model": "Audio TH1 (ANC on, Harman curve)",
       "category": "over-ear",
       "source": "Kuulokenurkka",
@@ -539280,8 +539391,8 @@
       }
     },
     {
-      "name": "\u00e9coute Audio TH1 (passive)",
-      "brand": "\u00e9coute",
+      "name": "écoute Audio TH1 (passive)",
+      "brand": "écoute",
       "model": "Audio TH1 (passive)",
       "category": "over-ear",
       "source": "Kuulokenurkka",

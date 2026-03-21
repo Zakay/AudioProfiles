@@ -234,7 +234,7 @@ struct EQPresetPopover: View {
                 Image(systemName: "magnifyingglass")
                     .font(.caption)
                     .foregroundColor(.secondary)
-                TextField("Search headphones…", text: $searchText)
+                TextField("Search audio devices…", text: $searchText)
                     .textFieldStyle(.plain)
                     .font(.system(size: 12))
                     .onSubmit {
@@ -291,7 +291,7 @@ struct EQPresetPopover: View {
 
                 // Search results
                 if searchResults.isEmpty && !searchText.isEmpty {
-                    Text("No headphones found")
+                    Text("No devices found")
                         .font(.caption)
                         .foregroundColor(.secondary)
                         .padding(10)
