@@ -134,10 +134,6 @@ struct EQTabView: View {
     /// Pick the best device. `defaultDeviceUID` is resolved off the main thread.
     private func autoSelectDevice(defaultDeviceUID: String? = nil) {
         guard !outputDevices.isEmpty else { return }
-        // If current selection is still valid, keep it
-        if let id = selectedDeviceID, outputDevices.contains(where: { $0.id == id }) {
-            return
-        }
         // When EQ is running, the system default output is the virtual device.
         // Use the EQ engine's target UID to find the real device behind it.
         if EQEngineService.shared.isRunning,
