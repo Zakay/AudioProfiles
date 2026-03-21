@@ -42,10 +42,13 @@ final class EQEngineService: ObservableObject {
     /// Prevent reference objects from being deallocated while render callbacks use them
     private var eqRenderRef: EQRenderRef?
 
-    /// Volume sync: mirrors virtual device volume to real device
+    /// Track current real/virtual device IDs for volume restore on switch
     private var virtualDeviceID: AudioObjectID?
     private var realDeviceID: AudioObjectID?
-    private var volumeListenerBlock: AudioObjectPropertyListenerBlock?
+
+    /// Cancellable async teardown work — prevents a pending stopSafe from
+    /// overwriting the default output device after a new start().
+    private var pendingTeardownWork: DispatchWorkItem?
 
     private var cancellables = Set<AnyCancellable>()
 
@@ -97,6 +100,10 @@ final class EQEngineService: ObservableObject {
         settings: EQSettings,
         virtualDeviceName: String
     ) {
+        // Cancel any pending async teardown that would overwrite our new default output
+        pendingTeardownWork?.cancel()
+        pendingTeardownWork = nil
+
         stopEngineOnly()
 
         // Increment generation so stale callbacks from previous pipeline are ignored
@@ -222,9 +229,147 @@ final class EQEngineService: ObservableObject {
         self.isRunning = true
 
         // Sync volume: copy current real device volume to virtual, then listen for changes
-        startVolumeSync(virtualID: virtualObjectID, realID: realObjectID)
+        syncVolumeForEQ(virtualID: virtualObjectID, realID: realObjectID)
 
         AppLogger.error("[EQ-DIAG] pipeline running ✓")
+    }
+
+    // MARK: - Switch device (hot-swap without tearing down virtual device)
+
+    /// Hot-swap the real output device while keeping the virtual device as system default.
+    /// Apps never see a device change — only the real hardware endpoint changes.
+    /// Use this when EQ is already running and we just need to route to a different device.
+    func switchDevice(
+        realDeviceUID: String,
+        settings: EQSettings,
+        virtualDeviceName: String
+    ) {
+        guard isRunning else {
+            // Not running — fall back to full start
+            start(realDeviceUID: realDeviceUID, settings: settings, virtualDeviceName: virtualDeviceName)
+            return
+        }
+
+        // Cancel any pending async teardown
+        pendingTeardownWork?.cancel()
+        pendingTeardownWork = nil
+
+        AppLogger.info("EQEngineService: switching device → '\(virtualDeviceName)' real=\(realDeviceUID)")
+
+        // 1. Increment generation — stale callbacks from old pipeline bail out immediately
+        gGeneration.pointee &+= 1
+        let gen = gGeneration.pointee
+
+        // 2. Restore old real device volume from virtual device before switching away
+        if let vID = virtualDeviceID, let rID = realDeviceID {
+            let currentVirtualVol = getDeviceVolume(vID)
+            setDeviceVolume(rID, volume: currentVirtualVol)
+            AppLogger.info("EQEngineService: restored old real device volume to \(String(format: "%.0f%%", currentVirtualVol * 100))")
+        }
+
+        // 3. Stop old output AUHAL + EQ (but do NOT hide virtual device or change system default)
+        let alreadyPoisoned = gRenderStopped.pointee != 0
+        OSAtomicCompareAndSwap32(0, 1, gRenderStopped)
+        if !alreadyPoisoned {
+            if let au = outputAU { AudioOutputUnitStop(au); AudioComponentInstanceDispose(au) }
+            if let au = eqAU     { AudioComponentInstanceDispose(au) }
+        }
+        outputAU = nil
+        eqAU = nil
+
+        // 3. Reuse existing virtual device IDs (they don't change during a switch)
+        guard let virtualDevice = EQDriverService.shared.findAudioDevice(),
+              let virtualObjectID = translateUID(virtualDevice.id) else {
+            AppLogger.error("EQEngineService: virtual device lost during switch")
+            stopSafe(switchTo: realDeviceUID)
+            return
+        }
+        guard let realObjectID = translateUID(realDeviceUID) else {
+            AppLogger.error("EQEngineService: can't resolve real device UID '\(realDeviceUID)'")
+            stopSafe(switchTo: realDeviceUID)
+            return
+        }
+
+        // 4. Rename virtual device only if name actually changed (avoids HAL notification)
+        if virtualDevice.name != virtualDeviceName {
+            EQDriverService.shared.show(name: virtualDeviceName)
+        }
+
+        // 5. Match sample rates — only change if they differ (avoids HAL notification
+        //    that causes all connected apps to tear down and rebuild their streams)
+        let realRate = getDeviceSampleRate(realObjectID) ?? 48000
+        let currentVirtualRate = getDeviceSampleRate(virtualObjectID) ?? 48000
+        if abs(realRate - currentVirtualRate) > 1.0 {
+            resetVirtualDeviceRate(virtualObjectID, to: realRate)
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        let virtualRate = getDeviceSampleRate(virtualObjectID) ?? realRate
+        let channels: UInt32 = 2
+        let format = makeNonInterleavedFormat(sampleRate: virtualRate, channels: channels)
+
+        do {
+            // 6. Fresh shared memory reader
+            guard let reader = SharedAudioReader() else {
+                throw AUError("Open shared memory reader", -1)
+            }
+            self.sharedReader = reader
+
+            // 7. Create new audio units
+            let eq     = try createEQUnit(settings: settings, format: format)
+            let output = try createOutputAUHAL(device: realObjectID, format: format)
+
+            // 8. Wire render chain
+            let eqRef = EQRenderRef(eqUnit: eq, reader: reader, generation: gen)
+            self.eqRenderRef = eqRef
+
+            var outputCB = AURenderCallbackStruct(
+                inputProc: outputRenderCallback,
+                inputProcRefCon: Unmanaged.passUnretained(eqRef).toOpaque()
+            )
+            var status = AudioUnitSetProperty(output, kAudioUnitProperty_SetRenderCallback,
+                                           kAudioUnitScope_Input, 0,
+                                           &outputCB, UInt32(MemoryLayout<AURenderCallbackStruct>.size))
+            guard status == noErr else { throw AUError("Set output render callback", status) }
+
+            var eqCB = AURenderCallbackStruct(
+                inputProc: eqInputRenderCallback,
+                inputProcRefCon: Unmanaged.passUnretained(eqRef).toOpaque()
+            )
+            status = AudioUnitSetProperty(eq, kAudioUnitProperty_SetRenderCallback,
+                                           kAudioUnitScope_Input, 0,
+                                           &eqCB, UInt32(MemoryLayout<AURenderCallbackStruct>.size))
+            guard status == noErr else { throw AUError("Set EQ input render callback", status) }
+
+            // 9. Initialize + start
+            status = AudioUnitInitialize(eq)
+            guard status == noErr else { throw AUError("Initialize EQ", status) }
+            status = AudioUnitInitialize(output)
+            guard status == noErr else { throw AUError("Initialize output AUHAL", status) }
+
+            OSAtomicCompareAndSwap32(1, 0, gRenderStopped)
+
+            status = AudioOutputUnitStart(output)
+            guard status == noErr else { throw AUError("Start output AUHAL", status) }
+
+            self.eqAU     = eq
+            self.outputAU = output
+
+        } catch {
+            AppLogger.error("EQEngineService: switch failed: \(error) — falling back to full restart")
+            stopEngineOnly()
+            start(realDeviceUID: realDeviceUID, settings: settings, virtualDeviceName: virtualDeviceName)
+            return
+        }
+
+        // 10. Update state (no setDefaultOutputDevice — virtual device is already default)
+        self.targetDeviceUID = realDeviceUID
+        self.virtualDeviceID = virtualObjectID
+        self.realDeviceID = realObjectID
+
+        // 11. Volume: read real device's current volume, apply to virtual, then sync
+        syncVolumeForEQ(virtualID: virtualObjectID, realID: realObjectID)
+
+        AppLogger.info("EQEngineService: switch complete ✓")
     }
 
     // MARK: - Stop
@@ -262,9 +407,11 @@ final class EQEngineService: ObservableObject {
         stopEngineOnly()
         EQDriverService.shared.hide()
         targetDeviceUID = nil
+        virtualDeviceID = nil
+        realDeviceID = nil
         isRunning = false
 
-        let work = { [self] in
+        let work = DispatchWorkItem { [self] in
             let devices = AudioDeviceFactory.getCurrentDevices()
             if let realDevice = devices.first(where: { $0.id == realDeviceUID && $0.isOutput }) {
                 let ok = AudioDeviceControlService().setDefaultOutputDevice(realDevice)
@@ -279,8 +426,9 @@ final class EQEngineService: ObservableObject {
         // Core Audio calls can hang if coreaudiod is restarting — use a background
         // queue for normal stop. At termination we must block (process exits after return).
         if synchronous {
-            work()
+            work.perform()
         } else {
+            pendingTeardownWork = work
             DispatchQueue.global(qos: .userInitiated).async(execute: work)
         }
     }
@@ -323,55 +471,24 @@ final class EQEngineService: ObservableObject {
         // The generation counter ensures stale callbacks return immediately.
         // They will be replaced when the next start() creates new ones,
         // and the old ones will be deallocated naturally by ARC at that point.
-
-        stopVolumeSync()
     }
 
     // MARK: - Private: Volume Sync
 
-    /// Start mirroring volume changes from the virtual device to the real device.
-    /// When the user adjusts system volume (which targets the virtual device),
-    /// we copy that volume to the real device so audio output level matches.
-    private func startVolumeSync(virtualID: AudioObjectID, realID: AudioObjectID) {
-        stopVolumeSync()
+    /// Set up volume for EQ mode: copy real device volume to virtual device,
+    /// then max out the real device. The driver applies volume scaling in its
+    /// WriteMix path (ioGain = volumeScalar), so the audio in shared memory
+    /// is already volume-adjusted — no listener needed.
+    private func syncVolumeForEQ(virtualID: AudioObjectID, realID: AudioObjectID) {
+        // Read the real device's current volume and apply it to the virtual device,
+        // so the user sees the correct volume level for this hardware device.
+        let realVolume = getDeviceVolume(realID)
+        setDeviceVolume(virtualID, volume: realVolume)
 
-        // Set real device to max so the virtual device's volume has full range
+        // Set real device to max — driver handles volume via its own gain control
         setDeviceVolume(realID, volume: 1.0)
 
-        // Listen for volume changes on the virtual device
-        var volumeAddr = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwareServiceDeviceProperty_VirtualMainVolume,
-            mScope: kAudioDevicePropertyScopeOutput,
-            mElement: kAudioObjectPropertyElementMain
-        )
-
-        let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            guard let self = self else { return }
-            let vol = self.getDeviceVolume(virtualID)
-            self.setDeviceVolume(realID, volume: vol)
-        }
-        self.volumeListenerBlock = listener
-
-        let status = AudioObjectAddPropertyListenerBlock(virtualID, &volumeAddr, DispatchQueue.main, listener)
-        if status != noErr {
-            AppLogger.error("EQEngineService: failed to add volume listener: \(status)")
-        } else {
-            AppLogger.info("EQEngineService: volume sync active")
-        }
-    }
-
-    private func stopVolumeSync() {
-        guard let vID = virtualDeviceID, let listener = volumeListenerBlock else { return }
-
-        var volumeAddr = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwareServiceDeviceProperty_VirtualMainVolume,
-            mScope: kAudioDevicePropertyScopeOutput,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        AudioObjectRemovePropertyListenerBlock(vID, &volumeAddr, DispatchQueue.main, listener)
-        self.volumeListenerBlock = nil
-        self.virtualDeviceID = nil
-        self.realDeviceID = nil
+        AppLogger.info("EQEngineService: volume synced (virtual=\(String(format: "%.0f%%", realVolume * 100)), real=100%)")
     }
 
     private func getDeviceVolume(_ deviceID: AudioObjectID) -> Float32 {

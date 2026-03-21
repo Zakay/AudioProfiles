@@ -284,9 +284,17 @@ class ProfileManager: ObservableObject {
 
     func activateProfile(with id: UUID, isManual: Bool = false) {
         guard let profile = getProfile(by: id) else { return }
-        
-        // Restore previously saved mode for this profile (if any)
+
+        // Skip redundant activation — avoids tearing down and rebuilding the EQ
+        // pipeline when the trigger service re-fires for an already-active profile.
         let restoredMode = getSavedMode(for: id)
+        let targetMode = restoredMode ?? profile.preferredMode
+        if !isManual,
+           activationService.activeProfile?.id == id,
+           activationService.activeMode == targetMode {
+            return
+        }
+
         activationService.activateProfile(profile, restoredMode: restoredMode)
 
         // Handle manual vs automatic selection differently
