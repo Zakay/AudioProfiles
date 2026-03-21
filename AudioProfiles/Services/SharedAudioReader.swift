@@ -152,7 +152,14 @@ final class SharedAudioReader {
         OSMemoryBarrier()
 
         // How many frames are available?
-        var available = writeIdx >= readIndex ? Int(writeIdx - readIndex) : 0
+        // If writeIdx < readIndex, the driver reset (IO stopped/restarted) — resync.
+        var available: Int
+        if writeIdx >= readIndex {
+            available = Int(writeIdx - readIndex)
+        } else {
+            readIndex = writeIdx
+            available = 0
+        }
 
         // If we've fallen behind by more than the ring capacity, resync
         // (the oldest data has been overwritten)
