@@ -149,8 +149,16 @@ class ProfileActivationService: ObservableObject {
             }
         }
 
-        // Fall back to current system defaults for display when profile has no priorities
+        // No output device resolved — if EQ is still running, stop it
+        // (e.g. profile with empty priority list after device disconnect)
         if !didSetOutput {
+            Task { @MainActor in
+                if EQEngineService.shared.isRunning,
+                   let fallbackUID = EQEngineService.shared.targetDeviceUID {
+                    AppLogger.info("Stopping EQ: no output device resolved for profile '\(profile.name)'")
+                    EQEngineService.shared.stopSafe(switchTo: fallbackUID)
+                }
+            }
             activeOutputDeviceName = deviceControlService.getDefaultOutputDevice()?.name
         }
         if !didSetInput {

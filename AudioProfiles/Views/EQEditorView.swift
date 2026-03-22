@@ -178,26 +178,30 @@ struct EQEditorView: View {
     private func applySettings(_ newSettings: EQSettings) {
         eqStore.setSettings(newSettings, for: deviceUID)
 
-        if EQEngineService.shared.isRunning,
-           EQEngineService.shared.targetDeviceUID == deviceUID {
-            Task { @MainActor in EQEngineService.shared.updateSettings(newSettings) }
-        } else if !newSettings.isFlat && !EQEngineService.shared.isRunning {
-            // Check default output device off main thread to avoid Core Audio hangs
-            let uid = deviceUID
-            let name = deviceName
-            DispatchQueue.global(qos: .userInitiated).async {
-                let isDefault = AudioDeviceControlService().getDefaultOutputDevice()?.id == uid
-                if isDefault {
-                    DispatchQueue.main.async {
-                        guard EQInstallationService.shared.isInstalled else { return }
-                        guard !EQEngineService.shared.isRunning else { return }
-                        EQEngineService.shared.start(
-                            realDeviceUID: uid,
-                            settings: newSettings,
-                            virtualDeviceName: "\(name) EQ"
-                        )
-                    }
-                }
+        let uid = deviceUID
+        let name = deviceName
+
+        Task { @MainActor in
+            guard EQInstallationService.shared.isInstalled else { return }
+
+            if EQEngineService.shared.isRunning,
+               EQEngineService.shared.targetDeviceUID == uid {
+                // Same device — hot update EQ bands
+                EQEngineService.shared.updateSettings(newSettings)
+            } else if EQEngineService.shared.isRunning {
+                // Running on different device — switch to this one
+                EQEngineService.shared.switchDevice(
+                    realDeviceUID: uid,
+                    settings: newSettings,
+                    virtualDeviceName: "\(name) EQ"
+                )
+            } else if !newSettings.isFlat {
+                // Not running — start EQ for this device
+                EQEngineService.shared.start(
+                    realDeviceUID: uid,
+                    settings: newSettings,
+                    virtualDeviceName: "\(name) EQ"
+                )
             }
         }
     }
