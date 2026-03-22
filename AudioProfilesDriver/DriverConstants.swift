@@ -12,7 +12,7 @@ import CoreAudio
 let kDriverBundleID = "com.audioprofiles.driver"
 
 /// Bundle ID of the companion app — used to authorise custom property writes
-let kCompanionBundleID = "com.audioprofiles.AudioProfiles"
+let kCompanionBundleID = "company.yetanother.audioprofiles"
 
 /// Persistent UID for the single virtual device.
 /// The companion app looks up the device by this UID.
