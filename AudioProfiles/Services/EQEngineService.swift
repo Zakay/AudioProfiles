@@ -591,16 +591,8 @@ final class EQEngineService: ObservableObject {
                                kAudioUnitScope_Global, 0, settings.preamp, 0)
 
         for (i, band) in settings.bands.enumerated() {
-            let filterType: Float32
-            if i == 0 {
-                filterType = 7  // kAUNBandEQFilterType_LowShelf
-            } else if i == settings.bands.count - 1 {
-                filterType = 8  // kAUNBandEQFilterType_HighShelf
-            } else {
-                filterType = 0  // kAUNBandEQFilterType_Parametric
-            }
             AudioUnitSetParameter(unit, kAUNBandEQParam_FilterType + UInt32(i),
-                                   kAudioUnitScope_Global, 0, filterType, 0)
+                                   kAudioUnitScope_Global, 0, Float32(band.filterType.rawValue), 0)
             AudioUnitSetParameter(unit, kAUNBandEQParam_Frequency + UInt32(i),
                                    kAudioUnitScope_Global, 0, band.frequency, 0)
             AudioUnitSetParameter(unit, kAUNBandEQParam_Gain + UInt32(i),

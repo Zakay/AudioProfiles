@@ -1,5 +1,22 @@
 import Foundation
 
+// MARK: - EQ Filter Type
+
+/// Filter shape for an EQ band — maps to kAUNBandEQFilterType constants
+enum EQFilterType: Int, Codable, Equatable, CaseIterable {
+    case parametric = 0   // Bell/peak
+    case lowShelf   = 7
+    case highShelf  = 8
+
+    var label: String {
+        switch self {
+        case .parametric: return "PK"
+        case .lowShelf:   return "LS"
+        case .highShelf:  return "HS"
+        }
+    }
+}
+
 // MARK: - EQ Band
 
 /// A single parametric EQ band
@@ -11,12 +28,21 @@ struct EQBand: Codable, Equatable {
     var gain: Float
     /// Bandwidth in octaves (used for parametric filter)
     var bandwidth: Float
+    /// Filter type — parametric (bell), low shelf, or high shelf
+    var filterType: EQFilterType
 
     /// True when this band has no audible effect
     var isFlat: Bool { abs(gain) < 0.01 }
 
     static func at(_ frequency: Float) -> EQBand {
-        EQBand(frequency: frequency, gain: 0, bandwidth: 1.0)
+        EQBand(frequency: frequency, gain: 0, bandwidth: 1.0, filterType: .parametric)
+    }
+
+    /// Convert Q factor to bandwidth in octaves: BW = (2/ln2) * asinh(1/(2Q))
+    static func qToBandwidth(_ q: Float) -> Float {
+        guard q > 0 else { return 1.0 }
+        let bw = Float((2.0 / log(2.0)) * asinh(1.0 / (2.0 * Double(q))))
+        return bw.clamped(to: EQSettings.bandwidthRange)
     }
 }
 
@@ -51,12 +77,12 @@ struct EQSettings: Codable, Equatable {
 
     // MARK: Factory
 
-    /// All gains at 0 dB
+    /// All gains at 0 dB with standard filter types (low shelf, 8x parametric, high shelf)
     static var flat: EQSettings {
-        EQSettings(
-            preamp: 0,
-            bands: standardFrequencies.map { EQBand.at($0) }
-        )
+        var bands = standardFrequencies.map { EQBand.at($0) }
+        bands[0].filterType = .lowShelf
+        bands[9].filterType = .highShelf
+        return EQSettings(preamp: 0, bands: bands)
     }
 
     // MARK: Helpers

@@ -79,15 +79,79 @@ final class EQPresetService: ObservableObject {
         headphones.first { $0.name == name }
     }
 
-    /// Convert a preset's EQ values to our EQSettings format.
+    /// Convert a preset to EQSettings. Prefers PEQ data (per-filter Q/type/freq) over basic 10-band.
     func toEQSettings(headphone: EQPresetHeadphone, target: String) -> EQSettings? {
+        // Prefer PEQ data when available — it has per-filter Q, type, and exact frequency
+        if let peq = headphone.peq?[target] {
+            return peqToSettings(peq)
+        }
+        // Fall back to basic 10-band gains
         guard let gains = headphone.eq[target], gains.count == 10 else { return nil }
+        let frequencies = headphone.eqBandsHz ?? EQSettings.standardFrequencies
         var settings = EQSettings.flat
         for i in 0..<10 {
             settings.bands[i].gain = gains[i].clamped(to: EQSettings.gainRange)
+            if i < frequencies.count {
+                settings.bands[i].frequency = frequencies[i]
+            }
         }
-        // Preset applies band gains only, preamp stays at 0
         settings.preamp = 0
+        return settings
+    }
+
+    /// Convert PEQ data to 10-band EQSettings with proper Q→bandwidth, filter types, frequencies
+    private func peqToSettings(_ peq: EQPresetPEQ) -> EQSettings {
+        let parsed = peq.parsedFilters  // already sorted by frequency
+        var settings = EQSettings.flat
+        settings.preamp = peq.preamp.clamped(to: EQSettings.preampRange)
+
+        if parsed.isEmpty { return settings }
+
+        if parsed.count <= 10 {
+            // Map each PEQ filter to the nearest default band position
+            var assigned = Set<Int>()
+            for filter in parsed {
+                // Find the closest unassigned band by frequency (log distance)
+                let bestIdx = (0..<10)
+                    .filter { !assigned.contains($0) }
+                    .min { a, b in
+                        abs(log2(settings.bands[a].frequency / filter.frequency)) <
+                        abs(log2(settings.bands[b].frequency / filter.frequency))
+                    }
+                guard let idx = bestIdx else { continue }
+                assigned.insert(idx)
+                settings.bands[idx].frequency = filter.frequency
+                settings.bands[idx].gain = filter.gain.clamped(to: EQSettings.gainRange)
+                settings.bands[idx].bandwidth = EQBand.qToBandwidth(filter.q)
+                settings.bands[idx].filterType = filter.type
+            }
+        } else {
+            // More than 10 filters — keep shelves + highest-gain peaks
+            var shelves: [EQPresetPEQ.ParsedFilter] = []
+            var peaks: [EQPresetPEQ.ParsedFilter] = []
+            for f in parsed {
+                if f.type == .lowShelf || f.type == .highShelf { shelves.append(f) }
+                else { peaks.append(f) }
+            }
+            // Keep best LS and HS (highest absolute gain)
+            let bestLS = shelves.filter { $0.type == .lowShelf }.max { abs($0.gain) < abs($1.gain) }
+            let bestHS = shelves.filter { $0.type == .highShelf }.max { abs($0.gain) < abs($1.gain) }
+            var kept: [EQPresetPEQ.ParsedFilter] = []
+            if let ls = bestLS { kept.append(ls) }
+            if let hs = bestHS { kept.append(hs) }
+            // Fill remaining slots with highest-impact peaks
+            let slotsForPeaks = 10 - kept.count
+            let topPeaks = peaks.sorted { abs($0.gain) > abs($1.gain) }.prefix(slotsForPeaks)
+            kept.append(contentsOf: topPeaks)
+            kept.sort { $0.frequency < $1.frequency }
+
+            for (i, filter) in kept.prefix(10).enumerated() {
+                settings.bands[i].frequency = filter.frequency
+                settings.bands[i].gain = filter.gain.clamped(to: EQSettings.gainRange)
+                settings.bands[i].bandwidth = EQBand.qToBandwidth(filter.q)
+                settings.bands[i].filterType = filter.type
+            }
+        }
         return settings
     }
 }
