@@ -450,6 +450,8 @@ struct InteractiveEQGraphView: View {
     @State private var dragBand: Int? = nil
     /// Whether the drag has moved far enough from its start to count as a real drag
     @State private var isDragging = false
+    /// Track if we're dragging a width handle instead of the band dot
+    @State private var draggingWidthHandle = false
 
     var body: some View {
         GeometryReader { geo in
@@ -484,42 +486,62 @@ struct InteractiveEQGraphView: View {
                     .onChanged { value in
                         let area = graphArea(in: size)
                         if dragBand == nil {
-                            // First touch — find and select nearest band
-                            let nearest = findNearestBand(at: value.startLocation, area: area)
-                            dragBand = nearest
-                            selectedBand = nearest
+                            // First touch — check width handles first, then band dots
+                            if let widthIdx = findNearestWidthHandle(at: value.startLocation, area: area) {
+                                dragBand = widthIdx
+                                selectedBand = widthIdx
+                                draggingWidthHandle = true
+                            } else {
+                                let nearest = findNearestBand(at: value.startLocation, area: area)
+                                dragBand = nearest
+                                selectedBand = nearest
+                                draggingWidthHandle = false
+                            }
                             isDragging = false
                         }
-                        // Only start moving the dot after a 4pt drag threshold
+                        // Only start moving after a 4pt drag threshold
                         let dist = hypot(value.location.x - value.startLocation.x,
                                          value.location.y - value.startLocation.y)
                         if !isDragging && dist > 4 {
                             isDragging = true
                         }
                         if isDragging, let idx = dragBand {
-                            // Vertical: gain
-                            let gain = yToGain(value.location.y, area: area)
-                            let clampedGain = Float(max(Double(EQSettings.gainRange.lowerBound),
-                                                        min(Double(EQSettings.gainRange.upperBound), gain)))
-                            let roundedGain = (clampedGain * 10).rounded() / 10
-                            let snappedGain: Float = abs(roundedGain) < 0.3 ? 0 : roundedGain
+                            if draggingWidthHandle {
+                                // Width handle drag: distance from center frequency → bandwidth
+                                let band = settings.bands[idx]
+                                let centerX = freqToX(Double(band.frequency), area: area)
+                                let dragX = value.location.x
+                                let distFromCenter = abs(dragX - centerX)
+                                // Convert pixel distance to octaves: use the log scale
+                                let dragFreq = xToFreq(centerX + distFromCenter, area: area)
+                                let bandwidth = Float(abs(log2(dragFreq / Double(band.frequency))) * 2)
+                                let clamped = max(EQSettings.bandwidthRange.lowerBound,
+                                                  min(EQSettings.bandwidthRange.upperBound, bandwidth))
+                                let rounded = (clamped * 10).rounded() / 10
+                                onChange(settings.withBand(at: idx, bandwidth: rounded))
+                            } else {
+                                // Band dot drag: gain + frequency
+                                let gain = yToGain(value.location.y, area: area)
+                                let clampedGain = Float(max(Double(EQSettings.gainRange.lowerBound),
+                                                            min(Double(EQSettings.gainRange.upperBound), gain)))
+                                let roundedGain = (clampedGain * 10).rounded() / 10
+                                let snappedGain: Float = abs(roundedGain) < 0.3 ? 0 : roundedGain
 
-                            // Horizontal: frequency (log scale)
-                            let freq = Float(xToFreq(value.location.x, area: area))
-                            // Snap to default frequency when within ~8% on log scale
-                            let defaultFreq = EQSettings.standardFrequencies[idx]
-                            let logRatio = abs(log2(freq / defaultFreq))
-                            let snappedFreq = logRatio < 0.12 ? defaultFreq : freq
+                                let freq = Float(xToFreq(value.location.x, area: area))
+                                let defaultFreq = EQSettings.standardFrequencies[idx]
+                                let logRatio = abs(log2(freq / defaultFreq))
+                                let snappedFreq = logRatio < 0.12 ? defaultFreq : freq
 
-                            var updated = settings
-                                .withBand(at: idx, gain: snappedGain)
-                            updated = updated.withBand(at: idx, frequency: snappedFreq)
-                            onChange(updated)
+                                var updated = settings.withBand(at: idx, gain: snappedGain)
+                                updated = updated.withBand(at: idx, frequency: snappedFreq)
+                                onChange(updated)
+                            }
                         }
                     }
                     .onEnded { _ in
                         dragBand = nil
                         isDragging = false
+                        draggingWidthHandle = false
                     }
             )
             .onTapGesture(count: 2) { location in
@@ -582,6 +604,36 @@ struct InteractiveEQGraphView: View {
             }
         }
         return bestIdx
+    }
+
+    /// Returns the band index if the point is near a width handle of the selected band
+    private func findNearestWidthHandle(at point: CGPoint, area: CGRect) -> Int? {
+        guard let idx = selectedBand, idx < settings.bands.count else { return nil }
+        let band = settings.bands[idx]
+        guard abs(band.gain) >= 0.5 else { return nil }  // No handles for near-flat bands
+
+        let (leftPt, rightPt) = widthHandlePositions(bandIndex: idx, area: area)
+        let handleRadius: CGFloat = 14
+        if hypot(point.x - leftPt.x, point.y - leftPt.y) < handleRadius { return idx }
+        if hypot(point.x - rightPt.x, point.y - rightPt.y) < handleRadius { return idx }
+        return nil
+    }
+
+    /// Calculate the positions of width handles at the half-gain points of the bell curve
+    private func widthHandlePositions(bandIndex: Int, area: CGRect) -> (left: CGPoint, right: CGPoint) {
+        let band = settings.bands[bandIndex]
+        let f0 = Double(band.frequency)
+        let bw = Double(band.bandwidth)
+        let halfGain = Double(band.gain) * 0.5  // Half-gain point on the curve
+
+        let leftFreq = f0 * pow(2.0, -bw / 2.0)
+        let rightFreq = f0 * pow(2.0, bw / 2.0)
+
+        let leftPt = CGPoint(x: freqToX(leftFreq, area: area),
+                              y: gainToY(halfGain, area: area))
+        let rightPt = CGPoint(x: freqToX(rightFreq, area: area),
+                               y: gainToY(halfGain, area: area))
+        return (leftPt, rightPt)
     }
 
     // MARK: - Drawing: Grid
@@ -756,6 +808,25 @@ struct InteractiveEQGraphView: View {
 
             // White border
             ctx.stroke(dot, with: .color(.white.opacity(isSelected ? 0.9 : 0.5)), lineWidth: isSelected ? 2 : 1)
+
+            // Width handles for selected band (only if band has audible gain)
+            if isSelected && abs(band.gain) >= 0.5 {
+                let (leftPt, rightPt) = widthHandlePositions(bandIndex: i, area: area)
+                let handleR: CGFloat = 4
+                for pt in [leftPt, rightPt] {
+                    // Only draw if within graph bounds
+                    guard pt.x >= area.minX && pt.x <= area.maxX else { continue }
+                    let handle = Path(ellipseIn: CGRect(x: pt.x - handleR, y: pt.y - handleR,
+                                                         width: handleR * 2, height: handleR * 2))
+                    ctx.fill(handle, with: .color(color.opacity(0.6)))
+                    ctx.stroke(handle, with: .color(.white.opacity(0.7)), lineWidth: 1.5)
+                }
+                // Connecting line between handles through the center dot
+                var line = Path()
+                line.move(to: leftPt)
+                line.addLine(to: rightPt)
+                ctx.stroke(line, with: .color(color.opacity(0.3)), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+            }
         }
     }
 
