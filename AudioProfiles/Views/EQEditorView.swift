@@ -497,12 +497,24 @@ struct InteractiveEQGraphView: View {
                             isDragging = true
                         }
                         if isDragging, let idx = dragBand {
+                            // Vertical: gain
                             let gain = yToGain(value.location.y, area: area)
-                            let clamped = Float(max(Double(EQSettings.gainRange.lowerBound),
-                                                    min(Double(EQSettings.gainRange.upperBound), gain)))
-                            let rounded = (clamped * 10).rounded() / 10
-                            let snapped: Float = abs(rounded) < 0.3 ? 0 : rounded
-                            onChange(settings.withBand(at: idx, gain: snapped))
+                            let clampedGain = Float(max(Double(EQSettings.gainRange.lowerBound),
+                                                        min(Double(EQSettings.gainRange.upperBound), gain)))
+                            let roundedGain = (clampedGain * 10).rounded() / 10
+                            let snappedGain: Float = abs(roundedGain) < 0.3 ? 0 : roundedGain
+
+                            // Horizontal: frequency (log scale)
+                            let freq = Float(xToFreq(value.location.x, area: area))
+                            // Snap to default frequency when within ~8% on log scale
+                            let defaultFreq = EQSettings.standardFrequencies[idx]
+                            let logRatio = abs(log2(freq / defaultFreq))
+                            let snappedFreq = logRatio < 0.12 ? defaultFreq : freq
+
+                            var updated = settings
+                                .withBand(at: idx, gain: snappedGain)
+                            updated = updated.withBand(at: idx, frequency: snappedFreq)
+                            onChange(updated)
                         }
                     }
                     .onEnded { _ in
@@ -547,6 +559,11 @@ struct InteractiveEQGraphView: View {
     private func yToGain(_ y: CGFloat, area: CGRect) -> Double {
         let normalized = Double(area.maxY - y) / Double(area.height)
         return displayMin + normalized * (displayMax - displayMin)
+    }
+
+    private func xToFreq(_ x: CGFloat, area: CGRect) -> Double {
+        let normalized = Double(x - area.minX) / Double(area.width)
+        return minFreq * pow(maxFreq / minFreq, normalized)
     }
 
     // MARK: - Hit Testing

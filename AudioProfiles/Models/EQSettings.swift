@@ -5,7 +5,8 @@ import Foundation
 /// A single parametric EQ band
 struct EQBand: Codable, Equatable {
     /// Center frequency in Hz (e.g. 32, 64, 125 … 16000)
-    let frequency: Float
+    /// Draggable horizontally in the graph — defaults to standard positions.
+    var frequency: Float
     /// Gain in dB — range -12 … +12
     var gain: Float
     /// Bandwidth in octaves (used for parametric filter)
@@ -73,6 +74,19 @@ struct EQSettings: Codable, Equatable {
         guard index >= 0 && index < bands.count else { return self }
         var copy = self
         copy.bands[index].bandwidth = bandwidth.clamped(to: EQSettings.bandwidthRange)
+        return copy
+    }
+
+    /// Frequency range for bands
+    static let frequencyRange: ClosedRange<Float> = 20 ... 20_000
+
+    /// Return a copy with the given band's frequency updated, clamped between neighbors
+    func withBand(at index: Int, frequency: Float) -> EQSettings {
+        guard index >= 0 && index < bands.count else { return self }
+        let minFreq: Float = index > 0 ? bands[index - 1].frequency * 1.05 : EQSettings.frequencyRange.lowerBound
+        let maxFreq: Float = index < bands.count - 1 ? bands[index + 1].frequency * 0.95 : EQSettings.frequencyRange.upperBound
+        var copy = self
+        copy.bands[index].frequency = frequency.clamped(to: minFreq ... maxFreq)
         return copy
     }
 
