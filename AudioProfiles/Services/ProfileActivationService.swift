@@ -97,6 +97,18 @@ class ProfileActivationService: ObservableObject {
 
             // EQ checks and operations must run on @MainActor
             Task { @MainActor in
+                // Orphan recovery: if the virtual device is the system default but the
+                // EQ engine isn't running (e.g. after a crash), clean up before proceeding.
+                if !EQEngineService.shared.isRunning,
+                   let virtualObjID = EQDriverService.shared.findDevice() {
+                    let currentDefault = controlService.getDefaultOutputDevice()
+                    if currentDefault?.objectID == virtualObjID {
+                        AppLogger.info("Orphan recovery: virtual device is system default but EQ not running — cleaning up")
+                        controlService.setDefaultOutputDevice(device)
+                        EQDriverService.shared.hide()
+                    }
+                }
+
                 let eqSettings = EQStore.shared.activeEQ(for: deviceID)
                 let hasEQ = eqSettings != nil && EQInstallationService.shared.isInstalled
                 let eqRunning = EQEngineService.shared.isRunning
@@ -123,11 +135,6 @@ class ProfileActivationService: ObservableObject {
                     } else {
                         AppLogger.error("Failed to set output device: \(deviceName)")
                     }
-                    // Stop EQ if it was running for a different device
-                    if EQEngineService.shared.isRunning {
-                        AppLogger.info("Stopping EQ: device changed to '\(deviceName)' (no EQ)")
-                        EQEngineService.shared.stopSafe(switchTo: deviceID)
-                    }
                 }
             }
             activeOutputDeviceName = device.name
@@ -149,7 +156,7 @@ class ProfileActivationService: ObservableObject {
             }
         }
 
-        // No output device resolved — if EQ is still running, stop it
+        // No output device resolved — clean up EQ if active
         // (e.g. profile with empty priority list after device disconnect)
         if !didSetOutput {
             Task { @MainActor in
@@ -157,6 +164,14 @@ class ProfileActivationService: ObservableObject {
                    let fallbackUID = EQEngineService.shared.targetDeviceUID {
                     AppLogger.info("Stopping EQ: no output device resolved for profile '\(profile.name)'")
                     EQEngineService.shared.stopSafe(switchTo: fallbackUID)
+                } else if !EQEngineService.shared.isRunning,
+                          let virtualObjID = EQDriverService.shared.findDevice() {
+                    // Orphan: virtual device visible but engine not running
+                    let currentDefault = self.deviceControlService.getDefaultOutputDevice()
+                    if currentDefault?.objectID == virtualObjID {
+                        AppLogger.info("Orphan recovery (no output resolved): hiding virtual device")
+                        EQDriverService.shared.hide()
+                    }
                 }
             }
             activeOutputDeviceName = deviceControlService.getDefaultOutputDevice()?.name
