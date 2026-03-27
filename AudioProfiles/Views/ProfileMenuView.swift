@@ -75,7 +75,7 @@ struct ProfileMenuView: View {
             }
             
             Divider()
-            
+
             // Profile list (removed mode toggle section)
             if profileManager.profiles.isEmpty {
                 Text("No profiles configured")
@@ -104,63 +104,35 @@ struct ProfileMenuView: View {
             
             Divider()
             
-            // Auto-switching controls
-            if profileManager.isAutoSwitchingDisabled {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Image(systemName: "bolt.slash")
-                            .foregroundColor(.orange)
-                            .frame(width: 16, height: 16)
-                            .frame(width: 24) // Container for alignment
-                        
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Auto-switching disabled")
-                                .font(.caption)
-                                .foregroundColor(.orange)
-                            
-                            if let remainingTime = profileManager.remainingDisableTime {
-                                Text("Re-enables in \(remainingTime)")
-                                    .font(.caption2)
-                                    .foregroundColor(.secondary)
-                            } else {
-                                Text("Disabled forever")
-                                    .font(.caption2)
-                                    .foregroundColor(.secondary)
-                            }
-                        }
-                        
-                        Spacer()
-                    }
-                    .padding(.leading, 4)
-                    
-                    Button("Enable Auto-switching") {
-                        profileManager.enableAutoSwitching()
-                    }
-                    .buttonStyle(MenuRowButtonStyle())
-                }
-            } else {
-                Button {
+            // Auto Profiles toggle
+            Button {
+                if profileManager.isAutoSwitchingDisabled {
+                    profileManager.enableAutoSwitching()
+                } else {
                     dismissPopover()
                     WindowManager.shared.openAutoSwitchingDialog()
-                } label: {
-                    HStack {
-                        Image(systemName: "bolt")
-                            .foregroundColor(.green)
-                            .frame(width: 16, height: 16)
-                            .frame(width: 24) // Container for alignment
-                        
-                        Text("Auto-switching")
-                        Spacer()
-                        Text("Enabled")
-                            .font(.caption)
-                            .foregroundColor(.green)
-                    }
                 }
-                .buttonStyle(MenuRowButtonStyle())
+            } label: {
+                HStack {
+                    Image(systemName: "bolt")
+                        .foregroundColor(profileManager.isAutoSwitchingDisabled ? .secondary : .accentColor)
+                        .frame(width: 16, height: 16)
+                        .frame(width: 24)
+
+                    Text("Auto Profiles")
+                    Spacer()
+                    Text(profileManager.isAutoSwitchingDisabled ? "Off" : "On")
+                        .font(.caption)
+                        .foregroundColor(profileManager.isAutoSwitchingDisabled ? .secondary : .green)
+                }
             }
-            
+            .buttonStyle(MenuRowButtonStyle())
+
+            // Auto Content Mode toggle
+            AutoContentModeRow()
+
             Divider()
-            
+
             // Settings button
             Button("Configure") {
                 dismissPopover()
@@ -219,4 +191,82 @@ struct ProfileMenuView: View {
         dismissPopover()
         WindowManager.shared.openAboutWindow()
     }
-} 
+}
+
+// MARK: - Auto Content Mode Row
+
+struct AutoContentModeRow: View {
+    @StateObject private var store = SoundModesStore.shared
+
+    var body: some View {
+        HStack(spacing: 0) {
+            // Main toggle button
+            Button {
+                store.isEnabled.toggle()
+            } label: {
+                HStack {
+                    Image(systemName: "waveform")
+                        .foregroundColor(store.isEnabled ? .accentColor : .secondary)
+                        .frame(width: 16, height: 16)
+                        .frame(width: 24)
+
+                    Text("Auto Content Mode")
+                    Spacer()
+
+                    Text(store.isEnabled ? "On" : "Off")
+                        .font(.caption)
+                        .foregroundColor(store.isEnabled ? .green : .secondary)
+                }
+            }
+            .buttonStyle(MenuRowButtonStyle())
+
+            // Mode selector — only when enabled
+            if store.isEnabled {
+                Menu {
+                    Button {
+                        store.manualOverride = nil
+                    } label: {
+                        HStack {
+                            Text("Auto")
+                            if store.manualOverride == nil {
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+
+                    Divider()
+
+                    ForEach(ContentModeType.allCases.filter { $0 != .none }, id: \.self) { mode in
+                        Button {
+                            store.manualOverride = mode
+                        } label: {
+                            HStack {
+                                Label(mode.displayName, systemImage: mode.iconName)
+                                if store.manualOverride == mode {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 3) {
+                        let displayed = store.manualOverride ?? store.activeContentMode
+                        if displayed != .none {
+                            Image(systemName: displayed.iconName)
+                                .font(.caption2)
+                        }
+                        Text(store.manualOverride?.displayName ?? "Auto")
+                            .font(.caption)
+                    }
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(Color.accentColor.opacity(0.15))
+                    .foregroundColor(.accentColor)
+                    .cornerRadius(5)
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+            }
+        }
+    }
+}

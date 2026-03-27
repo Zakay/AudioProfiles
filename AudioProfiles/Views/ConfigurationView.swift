@@ -19,6 +19,9 @@ struct ConfigurationView: View {
 
             EQTabView()
                 .tabItem { Label("EQ", systemImage: "slider.vertical.3") }
+
+            SoundModesTabView()
+                .tabItem { Label("Content Modes", systemImage: "waveform") }
         }
         .frame(width: 530)
         .fixedSize(horizontal: false, vertical: true)

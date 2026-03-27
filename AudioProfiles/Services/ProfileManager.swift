@@ -312,6 +312,14 @@ class ProfileManager: ObservableObject {
         saveMode(activeMode, for: id)
     }
 
+    /// Re-apply the current profile without changing mode.
+    /// Used when external conditions change (e.g., Sound Modes content mode changes)
+    /// and the EQ pipeline may need to start/stop.
+    func reapplyActiveProfile() {
+        guard let profile = activeProfile else { return }
+        activationService.refreshActiveProfile(with: profile, preserveMode: true)
+    }
+
     func toggleMode() {
         activationService.toggleMode()
         // Persist the new mode for the active profile

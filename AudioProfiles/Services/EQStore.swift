@@ -51,6 +51,22 @@ final class EQStore: ObservableObject {
         saveModes()
     }
 
+    /// Returns the effective EQ for a device: base correction + content mode overlay.
+    /// This is the single integration point for the two-layer EQ system.
+    func effectiveSettings(for deviceUID: String) -> EQSettings {
+        let base = settings(for: deviceUID)
+        let overlay = SoundModesStore.shared.activeOverlay()
+        return EQSettings.combine(base: base, overlay: overlay)
+    }
+
+    /// Whether EQ processing is needed for a device (considering sound modes).
+    /// Returns true if the device has non-flat correction OR sound modes are active.
+    func needsEQ(for deviceUID: String) -> Bool {
+        let hasDeviceEQ = activeEQ(for: deviceUID) != nil
+        let hasSoundModes = SoundModesStore.shared.isEnabled && !SoundModesStore.shared.activeOverlay().isFlat
+        return hasDeviceEQ || hasSoundModes
+    }
+
     // MARK: - Persistence
 
     private func load() {

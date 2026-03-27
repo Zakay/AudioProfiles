@@ -10,6 +10,7 @@ struct EQEditorView: View {
     let deviceName: String
 
     @ObservedObject private var eqStore = EQStore.shared
+    @ObservedObject private var soundModesStore = SoundModesStore.shared
     @State private var selectedBand: Int? = nil
     @State private var showingPresetPicker = false
 
@@ -29,6 +30,7 @@ struct EQEditorView: View {
                 settings: settings,
                 selectedBand: $selectedBand,
                 frequencyResponse: activePresetHeadphone?.frequencyResponse,
+                contentOverlay: soundModesStore.isEnabled ? soundModesStore.activeOverlay() : nil,
                 onChange: applySettingsAsCustom
             )
 
@@ -437,6 +439,7 @@ struct InteractiveEQGraphView: View {
     let settings: EQSettings
     @Binding var selectedBand: Int?
     let frequencyResponse: [(hz: Float, db: Float)]?
+    let contentOverlay: EQSettings?
     let onChange: (EQSettings) -> Void
 
     private let minFreq: Double = 20
@@ -476,6 +479,9 @@ struct InteractiveEQGraphView: View {
                     }
                     drawPerBandCurves(ctx, area: area)
                     drawCompositeCurve(ctx, area: area)
+                    if let overlay = contentOverlay, !overlay.isFlat {
+                        drawContentOverlayCurve(ctx, area: area, overlay: overlay)
+                    }
                     drawDots(ctx, area: area)
                 }
             }
@@ -781,6 +787,30 @@ struct InteractiveEQGraphView: View {
         stroke.move(to: pts[0])
         pts.dropFirst().forEach { stroke.addLine(to: $0) }
         ctx.stroke(stroke, with: .color(Color.white.opacity(0.85)), lineWidth: 1.5)
+    }
+
+    // MARK: - Drawing: Content overlay curve (combined base + overlay)
+
+    private func drawContentOverlayCurve(_ ctx: GraphicsContext, area: CGRect, overlay: EQSettings) {
+        let combined = EQSettings.combine(base: settings, overlay: overlay)
+
+        let pts: [CGPoint] = (0...sampleCount).map { s in
+            let t = Double(s) / Double(sampleCount)
+            let freq = minFreq * pow(maxFreq / minFreq, t)
+            var g = Double(combined.preamp)
+            for (i, band) in combined.bands.enumerated() {
+                g += bandGain(band: band, bandIndex: i, at: freq)
+            }
+            g = max(displayMin, min(displayMax, g))
+            return CGPoint(x: freqToX(freq, area: area), y: gainToY(g, area: area))
+        }
+
+        // Dashed teal curve
+        var stroke = Path()
+        stroke.move(to: pts[0])
+        pts.dropFirst().forEach { stroke.addLine(to: $0) }
+        ctx.stroke(stroke, with: .color(Color.teal.opacity(0.7)),
+                   style: StrokeStyle(lineWidth: 1.5, dash: [6, 4]))
     }
 
     // MARK: - Drawing: Band dots

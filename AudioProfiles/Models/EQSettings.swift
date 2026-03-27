@@ -127,7 +127,7 @@ struct EQSettings: Codable, Equatable {
 
 // MARK: - Float clamping helper
 
-private extension Float {
+extension Float {
     func clamped(to range: ClosedRange<Float>) -> Float {
         Swift.max(range.lowerBound, Swift.min(range.upperBound, self))
     }

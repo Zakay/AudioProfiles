@@ -141,6 +141,17 @@ final class EQDriverService {
         return AudioDeviceFactory.createAudioDevice(from: objectID)
     }
 
+    /// Check if a given device UID is our virtual EQ device.
+    func isOurVirtualDevice(_ deviceUID: String) -> Bool {
+        return deviceUID == kDriverDeviceUID
+    }
+
+    /// Check if a given AudioObjectID is our virtual EQ device.
+    func isOurVirtualDevice(objectID: AudioObjectID) -> Bool {
+        guard let ourID = findDevice() else { return false }
+        return objectID == ourID
+    }
+
     // MARK: - Private
 
     private func setShown(_ shown: Bool, on deviceID: AudioObjectID) {

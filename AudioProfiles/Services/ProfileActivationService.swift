@@ -100,24 +100,23 @@ class ProfileActivationService: ObservableObject {
                 // Orphan recovery: if the virtual device is the system default but the
                 // EQ engine isn't running (e.g. after a crash), clean up before proceeding.
                 if !EQEngineService.shared.isRunning,
-                   let virtualObjID = EQDriverService.shared.findDevice() {
+                   let virtualDevice = EQDriverService.shared.findAudioDevice() {
                     let currentDefault = controlService.getDefaultOutputDevice()
-                    if currentDefault?.objectID == virtualObjID {
+                    if currentDefault?.id == virtualDevice.id {
                         AppLogger.info("Orphan recovery: virtual device is system default but EQ not running — cleaning up")
                         controlService.setDefaultOutputDevice(device)
                         EQDriverService.shared.hide()
                     }
                 }
 
-                let eqSettings = EQStore.shared.activeEQ(for: deviceID)
-                let hasEQ = eqSettings != nil && EQInstallationService.shared.isInstalled
+                let effectiveEQ = EQStore.shared.effectiveSettings(for: deviceID)
+                let hasEQ = EQStore.shared.needsEQ(for: deviceID) && EQInstallationService.shared.isInstalled
                 let eqRunning = EQEngineService.shared.isRunning
                 if eqRunning {
                     // Hot-swap to new device (keeps virtual device as system default)
-                    let settings = eqSettings ?? EQSettings.flat
                     EQEngineService.shared.switchDevice(
                         realDeviceUID: deviceID,
-                        settings: settings,
+                        settings: effectiveEQ,
                         virtualDeviceName: "\(deviceName) EQ"
                     )
                 } else if hasEQ {
@@ -125,11 +124,11 @@ class ProfileActivationService: ObservableObject {
                     AppLogger.info("Starting EQ for '\(deviceName)'")
                     EQEngineService.shared.start(
                         realDeviceUID: deviceID,
-                        settings: eqSettings!,
+                        settings: effectiveEQ,
                         virtualDeviceName: "\(deviceName) EQ"
                     )
                 } else {
-                    // No EQ — direct device switch
+                    // No EQ and no sound modes — direct device switch
                     if controlService.setDefaultOutputDevice(device) {
                         AppLogger.info("Set output device: \(deviceName)")
                     } else {
@@ -156,23 +155,53 @@ class ProfileActivationService: ObservableObject {
             }
         }
 
-        // No output device resolved — clean up EQ if active
-        // (e.g. profile with empty priority list after device disconnect)
+        // No output device resolved from priorities — use current system default
+        // This covers System Default profile and profiles where all priority devices are disconnected
         if !didSetOutput {
+            let controlService = deviceControlService
             Task { @MainActor in
-                if EQEngineService.shared.isRunning,
-                   let fallbackUID = EQEngineService.shared.targetDeviceUID {
-                    AppLogger.info("Stopping EQ: no output device resolved for profile '\(profile.name)'")
-                    EQEngineService.shared.stopSafe(switchTo: fallbackUID)
-                } else if !EQEngineService.shared.isRunning,
-                          let virtualObjID = EQDriverService.shared.findDevice() {
-                    // Orphan: virtual device visible but engine not running
-                    let currentDefault = self.deviceControlService.getDefaultOutputDevice()
-                    if currentDefault?.objectID == virtualObjID {
+                // Get the real current output — if our virtual device is the default,
+                // resolve the real device behind it to avoid "X EQ EQ" naming.
+                var currentDevice = controlService.getDefaultOutputDevice()
+                if let dev = currentDevice, EQDriverService.shared.isOurVirtualDevice(dev.id) {
+                    if EQEngineService.shared.isRunning,
+                       let realUID = EQEngineService.shared.targetDeviceUID {
+                        currentDevice = AudioDeviceFactory.getCurrentDevices().first { $0.id == realUID && $0.isOutput }
+                    } else {
+                        // Orphan — hide virtual device and get real default
                         AppLogger.info("Orphan recovery (no output resolved): hiding virtual device")
                         EQDriverService.shared.hide()
+                        currentDevice = controlService.getDefaultOutputDevice()
                     }
                 }
+
+                guard let device = currentDevice else { return }
+                let deviceID = device.id
+                let deviceName = device.name
+
+                let needsEQ = EQStore.shared.needsEQ(for: deviceID) && EQInstallationService.shared.isInstalled
+                let eqRunning = EQEngineService.shared.isRunning
+
+                if eqRunning && needsEQ {
+                    let effective = EQStore.shared.effectiveSettings(for: deviceID)
+                    EQEngineService.shared.switchDevice(
+                        realDeviceUID: deviceID,
+                        settings: effective,
+                        virtualDeviceName: "\(deviceName) EQ"
+                    )
+                } else if eqRunning && !needsEQ {
+                    AppLogger.info("Stopping EQ: no longer needed for '\(deviceName)'")
+                    EQEngineService.shared.stopSafe(switchTo: deviceID)
+                } else if !eqRunning && needsEQ {
+                    AppLogger.info("Starting EQ for system default '\(deviceName)' (Sound Modes active)")
+                    let effective = EQStore.shared.effectiveSettings(for: deviceID)
+                    EQEngineService.shared.start(
+                        realDeviceUID: deviceID,
+                        settings: effective,
+                        virtualDeviceName: "\(deviceName) EQ"
+                    )
+                }
+                // else: not running, not needed — nothing to do
             }
             activeOutputDeviceName = deviceControlService.getDefaultOutputDevice()?.name
         }

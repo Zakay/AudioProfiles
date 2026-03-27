@@ -91,6 +91,70 @@ final class EQEngineService: ObservableObject {
                 EQDriverService.shared.hide()
             }
             .store(in: &cancellables)
+
+        // Live hot-update when content mode or night mode changes.
+        // No dropFirst — we need to react to the initial value if detection
+        // already ran before this subscription was created (e.g., mic was active on launch).
+        SoundModesStore.shared.$activeContentMode
+            .combineLatest(SoundModesStore.shared.$isNightModeActive)
+            .removeDuplicates { $0.0 == $1.0 && $0.1 == $1.1 }
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] contentMode, nightActive in
+                guard let self = self else { return }
+                let msg = "EQEngine: content mode changed to \(contentMode.rawValue) (night=\(nightActive)), isRunning=\(self.isRunning)"
+                AppLogger.info(msg)
+                if self.isRunning, let deviceUID = self.targetDeviceUID {
+                    // Check if EQ is still needed — if not, let profile re-apply to tear down
+                    if !EQStore.shared.needsEQ(for: deviceUID) {
+                        AppLogger.info("EQEngineService: EQ no longer needed, re-applying profile")
+                        ProfileManager.shared.reapplyActiveProfile()
+                    } else {
+                        // Hot-update running pipeline
+                        let effective = EQStore.shared.effectiveSettings(for: deviceUID)
+                        self.updateSettings(effective)
+                        AppLogger.info("EQEngineService: live-updated EQ for content mode change")
+                    }
+                } else if !self.isRunning {
+                    // Engine not running — re-apply active profile to evaluate if virtual driver needed
+                    AppLogger.info("EQEngineService: content mode changed while stopped, re-evaluating")
+                    ProfileManager.shared.reapplyActiveProfile()
+                }
+            }
+            .store(in: &cancellables)
+
+        // Re-evaluate when Sound Modes master toggle changes.
+        // Debounce to handle rapid on/off toggling — only act on the final state.
+        SoundModesStore.shared.$isEnabled
+            .dropFirst()
+            .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
+            .sink { [weak self] enabled in
+                guard let self = self else { return }
+                AppLogger.info("EQEngine: Sound Modes toggled to \(enabled), isRunning=\(self.isRunning)")
+                ProfileManager.shared.reapplyActiveProfile()
+            }
+            .store(in: &cancellables)
+
+        // Live hot-update when overlay settings are edited (e.g., user drags a band in Voice mode editor)
+        SoundModesStore.shared.$overlays
+            .dropFirst() // Skip initial load
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self = self, self.isRunning, let deviceUID = self.targetDeviceUID else { return }
+                let effective = EQStore.shared.effectiveSettings(for: deviceUID)
+                self.updateSettings(effective)
+            }
+            .store(in: &cancellables)
+
+        // Same for night mode overlay edits
+        SoundModesStore.shared.$nightMode
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self = self, self.isRunning, let deviceUID = self.targetDeviceUID else { return }
+                let effective = EQStore.shared.effectiveSettings(for: deviceUID)
+                self.updateSettings(effective)
+            }
+            .store(in: &cancellables)
     }
 
     // MARK: - Start EQ pipeline
@@ -261,6 +325,7 @@ final class EQEngineService: ObservableObject {
         let gen = gGeneration.pointee
 
         // 2. Restore old real device volume from virtual device before switching away
+        //    so the real device remembers the user's last volume setting.
         if let vID = virtualDeviceID, let rID = realDeviceID {
             let currentVirtualVol = getDeviceVolume(vID)
             setDeviceVolume(rID, volume: currentVirtualVol)
@@ -438,7 +503,13 @@ final class EQEngineService: ObservableObject {
     func updateSettings(_ settings: EQSettings) {
         guard let eq = eqAU else { return }
         configureEQBands(eq, settings: settings)
-        AppLogger.info("EQEngineService: EQ settings updated")
+
+        // Bypass the entire EQ unit when all settings are flat — avoids the
+        // slight gain that NBandEQ introduces even with all bands at 0 dB.
+        var bypass: UInt32 = settings.isFlat ? 1 : 0
+        AudioUnitSetProperty(eq, kAudioUnitProperty_BypassEffect,
+                             kAudioUnitScope_Global, 0,
+                             &bypass, UInt32(MemoryLayout<UInt32>.size))
     }
 
     // MARK: - Private: stop engine
@@ -480,12 +551,12 @@ final class EQEngineService: ObservableObject {
     /// WriteMix path (ioGain = volumeScalar), so the audio in shared memory
     /// is already volume-adjusted — no listener needed.
     private func syncVolumeForEQ(virtualID: AudioObjectID, realID: AudioObjectID) {
-        // Read the real device's current volume and apply it to the virtual device,
-        // so the user sees the correct volume level for this hardware device.
+        // Transfer real device's volume to virtual device so user sees correct level.
+        // Then set real device to 100% — the AUHAL writes directly to hardware,
+        // bypassing macOS mixer, so we need max hardware gain. The virtual device's
+        // volume (applied by macOS in its mixer) is the sole volume control.
         let realVolume = getDeviceVolume(realID)
         setDeviceVolume(virtualID, volume: realVolume)
-
-        // Set real device to max — driver handles volume via its own gain control
         setDeviceVolume(realID, volume: 1.0)
 
         AppLogger.info("EQEngineService: volume synced (virtual=\(String(format: "%.0f%%", realVolume * 100)), real=100%)")
@@ -580,7 +651,13 @@ final class EQEngineService: ObservableObject {
 
         configureEQBands(unit, settings: settings)
 
-        AppLogger.error("[EQ-DIAG] EQ unit created with \(numBands) bands")
+        // Bypass entire EQ unit if settings are flat — avoids slight gain from processing
+        var bypass: UInt32 = settings.isFlat ? 1 : 0
+        AudioUnitSetProperty(unit, kAudioUnitProperty_BypassEffect,
+                             kAudioUnitScope_Global, 0,
+                             &bypass, UInt32(MemoryLayout<UInt32>.size))
+
+        AppLogger.error("[EQ-DIAG] EQ unit created with \(numBands) bands, bypass=\(bypass)")
         return unit
     }
 

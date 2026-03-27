@@ -343,6 +343,28 @@ notarize_driver() {
     fi
 }
 
+# ── Install driver to HAL ─────────────────────────────────────────────────────
+# Copies the built driver to /Library/Audio/Plug-Ins/HAL/ and restarts coreaudiod
+# so the new driver code is loaded. Requires admin privileges.
+install_driver_to_hal() {
+    local driver_path
+    driver_path=$(find_driver_bundle)
+    local hal_dir="/Library/Audio/Plug-Ins/HAL"
+    local hal_dest="${hal_dir}/AudioProfilesDriver.driver"
+
+    # Only install if the driver already exists in HAL (i.e., was previously installed)
+    if [[ ! -d "$hal_dest" ]]; then
+        print_status "Driver not installed in HAL — skipping (use app UI to install first time)"
+        return 0
+    fi
+
+    print_step "Updating driver in ${hal_dir} and restarting coreaudiod..."
+    osascript -e "do shell script \"rm -rf '${hal_dest}' && ditto '${driver_path}' '${hal_dest}' && killall coreaudiod\" with administrator privileges"
+    # Give coreaudiod a moment to restart and load the new driver
+    sleep 1
+    print_success "Driver updated in HAL and coreaudiod restarted."
+}
+
 # ── Deploy ────────────────────────────────────────────────────────────────────
 deploy_to_applications() {
     local app_path
@@ -413,6 +435,10 @@ main() {
     embed_driver_in_app
 
     if [[ "$DEPLOY_TO_APPLICATIONS" == true ]]; then
+        # If the driver was rebuilt, install it to HAL and restart coreaudiod
+        if [[ "$SKIP_DRIVER" != true ]]; then
+            install_driver_to_hal
+        fi
         deploy_to_applications
         launch_app
     else

@@ -156,10 +156,4 @@ final class EQPresetService: ObservableObject {
     }
 }
 
-// MARK: - Float clamping
-
-private extension Float {
-    func clamped(to range: ClosedRange<Float>) -> Float {
-        Swift.max(range.lowerBound, Swift.min(range.upperBound, self))
-    }
-}
+// Float.clamped(to:) defined in EQSettings.swift

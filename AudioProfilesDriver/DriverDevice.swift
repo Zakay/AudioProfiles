@@ -220,6 +220,9 @@ func deviceDoIOOperation(
 
     case kAPIOOperationWriteMix:
         // System audio → ring buffer + shared memory (real-time path — keep minimal)
+        // macOS sends full-scale audio here. Our driver applies the virtual device's
+        // volume (ioGain) before writing to shared memory. The real device is set to
+        // 100% so the full volume range is available through the virtual device.
         let abl = ioAudioBufferList.pointee
         if abl.mNumberBuffers > 0 {
             let buf = abl.mBuffers
@@ -227,9 +230,10 @@ func deviceDoIOOperation(
 
             // Apply volume/mute gain inline
             let gain = DriverState.shared.ioGain
-            if gain < 1.0 {
+            if gain < 1.0 || DriverState.shared.isMuted {
+                let effectiveGain = DriverState.shared.isMuted ? Float32(0) : gain
                 let count = Int(buf.mDataByteSize) / MemoryLayout<Float32>.size
-                for i in 0..<count { ptr[i] *= gain }
+                for i in 0..<count { ptr[i] *= effectiveGain }
             }
 
             ring.write(from: ptr, frameCount: frames)

@@ -25,12 +25,11 @@ final class StatusItemManager: NSObject, ObservableObject, NSPopoverDelegate {
         )
         hostingView = NSHostingView(rootView: statusView)
 
-        // Configure the hosting view
-        hostingView?.frame = NSRect(x: 0, y: 0, width: 28, height: 22)
-        statusItem?.button?.frame = hostingView?.frame ?? .zero
-
-        // Add the hosting view to the status item button
+        // Configure the hosting view — use intrinsic size for variable-width content
         if let hostingView = hostingView {
+            let size = hostingView.fittingSize
+            hostingView.frame = NSRect(origin: .zero, size: size)
+            statusItem?.button?.frame = hostingView.frame
             statusItem?.button?.addSubview(hostingView)
         }
 
@@ -48,13 +47,29 @@ final class StatusItemManager: NSObject, ObservableObject, NSPopoverDelegate {
             .combineLatest(pm.$activeProfile, pm.$isAutoSwitchingDisabled)
             .receive(on: RunLoop.main)
             .sink { [weak self] mode, profile, isDisabled in
-                self?.hostingView?.rootView = StatusItemView(
-                    mode: mode,
-                    icon: profile?.iconName ?? "speaker.wave.2.fill",
-                    isDisabled: isDisabled
-                )
+                Task { @MainActor in
+                    self?.updateStatusIcon(mode: mode, icon: profile?.iconName, isDisabled: isDisabled)
+                }
             }
             .store(in: &cancellables)
+    }
+
+    @MainActor
+    private func updateStatusIcon(mode: ProfileMode? = nil, icon: String? = nil, isDisabled: Bool? = nil) {
+        let pm = ProfileManager.shared
+        let sms = SoundModesStore.shared
+        hostingView?.rootView = StatusItemView(
+            mode: mode ?? pm.activeMode,
+            icon: icon ?? pm.activeProfile?.iconName ?? "speaker.wave.2.fill",
+            isDisabled: isDisabled ?? pm.isAutoSwitchingDisabled,
+            contentMode: sms.isEnabled ? sms.activeContentMode : nil
+        )
+        // Resize button to fit new content (mode text may change width)
+        if let hostingView = hostingView {
+            let size = hostingView.fittingSize
+            hostingView.frame = NSRect(origin: .zero, size: size)
+            statusItem?.button?.frame = hostingView.frame
+        }
     }
 
     @objc private func statusItemClicked() {
@@ -219,18 +234,31 @@ struct StatusItemView: View {
     let mode: ProfileMode
     let icon: String
     let isDisabled: Bool
+    var contentMode: ContentModeType? = nil
 
     var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 4)
-                .fill(backgroundColor)
-                .frame(width: 24, height: 18)
+        HStack(spacing: 3) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(backgroundColor)
+                    .frame(width: 24, height: 18)
 
-            Image(systemName: icon)
-                .foregroundColor(iconColor)
-                .font(.system(size: 12, weight: .medium))
+                Image(systemName: icon)
+                    .foregroundColor(iconColor)
+                    .font(.system(size: 12, weight: .medium))
+            }
+
+            // Show mode icon + name when content mode is active (not .none)
+            if let contentMode = contentMode, contentMode != .none {
+                Image(systemName: contentMode.iconName)
+                    .foregroundColor(.primary.opacity(0.7))
+                    .font(.system(size: 9, weight: .medium))
+                Text(contentMode.displayName)
+                    .foregroundColor(.primary.opacity(0.7))
+                    .font(.system(size: 10, weight: .medium))
+            }
         }
-        .frame(width: 28, height: 22)
+        .frame(height: 22)
     }
 
     private var backgroundColor: Color {

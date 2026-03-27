@@ -131,9 +131,12 @@ final class DriverState: @unchecked Sendable {
         }
     }
 
-    /// The gain factor applied in the IO path — accounts for mute
+    /// The gain factor applied in the IO path.
+    /// Uses the same squared curve that macOS applies for hardware volume,
+    /// so perceived loudness matches between virtual and real devices.
     var ioGain: Float32 {
-        isMuted ? 0.0 : volumeScalar
+        if isMuted || volumeScalar <= 0 { return 0.0 }
+        return volumeScalar * volumeScalar * volumeScalar
     }
 
     // MARK: IO state

@@ -16,6 +16,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // Start auto-detection (after ProfileManager is fully initialized)
     ProfileManager.shared.startTriggerDetection()
 
+    // Bootstrap Sound Modes services
+    Task { @MainActor in
+      // EQEngineService must be initialized first so its Combine subscriptions are active
+      _ = EQEngineService.shared
+      // Then start content mode detection
+      _ = ContentModeDetectionService.shared
+      _ = NightModeScheduler.shared
+      NSLog("[AudioProfiles] All services initialized, soundModesEnabled=\(SoundModesStore.shared.isEnabled)")
+    }
+
     // Show onboarding if this is the first launch
     if isFirstLaunch() {
       // Delay slightly to ensure the app is fully initialized
