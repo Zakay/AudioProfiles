@@ -16,11 +16,19 @@ class ProfileManager: ObservableObject {
     // Core services for real specialized responsibilities
     private let pipelineService = AudioPipelineService()
     private let deviceFilterService = DeviceFilterService()
-    private let persistenceService = ProfilePersistenceService()
+    private let persistenceService: ProfilePersistenceServiceProtocol = ProfilePersistenceService()
     private let validationService = ProfileValidationService()
     private let notificationService = NotificationService()
 
     private var cancellables = Set<AnyCancellable>()
+
+    /// Stores and services that need to trigger re-evaluation send to this subject
+    /// instead of calling `evaluateAndApply()` directly. This reverses the dependency
+    /// arrow: stores no longer import ProfileManager; ProfileManager observes them.
+    ///
+    /// A 0ms debounce coalesces multiple rapid sends (e.g. night mode toggle + overlay
+    /// change) into a single evaluation — matching the existing reentrancy guard behavior.
+    let pipelineInvalidationSubject = PassthroughSubject<Void, Never>()
 
     // MARK: - Published Properties
 
@@ -88,6 +96,13 @@ class ProfileManager: ObservableObject {
     // MARK: - Initialization
 
     private func initialize() {
+        // Subscribe to pipeline invalidation signals from stores.
+        // Debounce(0) coalesces multiple sends within the same run loop turn.
+        pipelineInvalidationSubject
+            .debounce(for: .milliseconds(0), scheduler: RunLoop.main)
+            .sink { [weak self] in self?.evaluateAndApply() }
+            .store(in: &cancellables)
+
         // Restore persisted manual switch timestamp (survives force-quit)
         if let ts = UserDefaults.standard.object(forKey: "lastManualSwitchTimestamp") as? Double {
             lastManualSwitchTimestamp = Date(timeIntervalSince1970: ts)

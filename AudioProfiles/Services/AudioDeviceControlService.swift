@@ -2,7 +2,7 @@ import Foundation
 import CoreAudio
 
 /// Handles setting audio devices as default system input/output
-class AudioDeviceControlService {
+class AudioDeviceControlService: AudioDeviceControlServiceProtocol {
     
     /// Set device as default output
     /// - Parameter device: AudioDevice to set as default output

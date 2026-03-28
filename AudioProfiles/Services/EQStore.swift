@@ -64,7 +64,7 @@ final class EQStore: ObservableObject {
     func setBypassed(_ bypassed: Bool, for deviceUID: String) {
         bypass[deviceUID] = bypassed
         saveBypass()
-        ProfileManager.shared.evaluateAndApply()
+        ProfileManager.shared.pipelineInvalidationSubject.send()
     }
 
     /// Toggle bypass state for a device.

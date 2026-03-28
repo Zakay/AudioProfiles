@@ -108,6 +108,6 @@ final class NightModeScheduler: ObservableObject {
         } else {
             AppLogger.info("Night mode deactivated")
         }
-        ProfileManager.shared.evaluateAndApply()
+        ProfileManager.shared.pipelineInvalidationSubject.send()
     }
 }

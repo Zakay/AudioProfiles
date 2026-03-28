@@ -1,7 +1,7 @@
 import Foundation
 
 /// Handles profile persistence operations (saving/loading from UserDefaults)
-class ProfilePersistenceService {
+class ProfilePersistenceService: ProfilePersistenceServiceProtocol {
     
     private let userDefaultsKey = "AudioProfiles"
     

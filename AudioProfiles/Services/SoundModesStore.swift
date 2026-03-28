@@ -59,20 +59,20 @@ final class SoundModesStore: ObservableObject {
             ContentModeDetectionService.shared.stopDetection()
         }
         NightModeScheduler.shared.reschedule()
-        ProfileManager.shared.evaluateAndApply()
+        ProfileManager.shared.pipelineInvalidationSubject.send()
     }
 
     func setOverlays(_ value: [ContentModeType: ContentModeOverlay]) {
         overlays = value
         saveOverlays()
-        ProfileManager.shared.evaluateAndApply()
+        ProfileManager.shared.pipelineInvalidationSubject.send()
     }
 
     func setNightMode(_ value: NightModeConfig) {
         nightMode = value
         saveNightMode()
         NightModeScheduler.shared.reschedule()
-        ProfileManager.shared.evaluateAndApply()
+        ProfileManager.shared.pipelineInvalidationSubject.send()
     }
 
     func setManualOverride(_ value: ContentModeType?) {

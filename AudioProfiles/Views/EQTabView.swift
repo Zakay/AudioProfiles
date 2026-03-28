@@ -1,40 +1,30 @@
 import SwiftUI
 
-// MARK: - EQTabView
-
+/// EQ configuration tab — device picker, install/update banners, and the EQ editor.
+///
+/// Device list and selection logic live in EQTabViewModel.
+/// Install sheet UI lives in EQDriverInstallSheet.swift.
 struct EQTabView: View {
 
     @ObservedObject private var eqStore        = EQStore.shared
     @ObservedObject private var installService = EQInstallationService.shared
     @ObservedObject private var profileManager = ProfileManager.shared
-    @State private var selectedDeviceID: String? = nil
-    @State private var showingInstallSheet = false
-    /// Cached device list — never query Core Audio synchronously on the main thread.
-    /// Updated from AudioDeviceMonitor (which queries on a background queue).
-    @State private var outputDevices: [AudioDevice] = []
-
-    private var selectedDevice: AudioDevice? {
-        outputDevices.first { $0.id == selectedDeviceID }
-    }
+    @StateObject   private var vm              = EQTabViewModel()
+    @State         private var showingInstallSheet = false
 
     private var isBypassed: Bool {
-        guard let id = selectedDeviceID else { return false }
+        guard let id = vm.selectedDeviceID else { return false }
         return EQStore.shared.isBypassed(for: id)
     }
 
-    // MARK: - Body
-
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            // Install / repair / update banners
             bannerSection
 
             if installService.isInstalled {
-                // Headline + device picker + reset
                 toolbarRow
 
-                // EQ editor for selected device
-                if let device = selectedDevice {
+                if let device = vm.selectedDevice {
                     EQEditorView(deviceUID: device.id, deviceName: device.name)
                         .id(device.id)
                 } else {
@@ -43,28 +33,11 @@ struct EQTabView: View {
             } else {
                 noDriverState
             }
-
         }
         .padding(.horizontal)
         .padding(.bottom)
         .padding(.top, 8)
-        .onAppear { refreshDevices() }
-        .onReceive(AudioDeviceMonitor.shared.deviceChangesSubject) { devices in
-            let filtered = devices.filter(\.isOutput).sorted { $0.name < $1.name }
-            outputDevices = filtered
-            // Resolve default device off main thread, then auto-select
-            DispatchQueue.global(qos: .userInitiated).async {
-                let defaultUID = AudioDeviceControlService().getDefaultOutputDevice()?.id
-                DispatchQueue.main.async {
-                    autoSelectDevice(defaultDeviceUID: defaultUID)
-                }
-            }
-        }
-        .onReceive(AudioDeviceMonitor.shared.serviceRestartedSubject) {
-            // coreaudiod restarted — clear stale device list, wait for fresh device notification
-            outputDevices = []
-            selectedDeviceID = nil
-        }
+        .onAppear { vm.refreshDevices() }
         .sheet(isPresented: $showingInstallSheet) {
             EQDriverInstallSheet(isPresented: $showingInstallSheet)
         }
@@ -74,7 +47,7 @@ struct EQTabView: View {
 
     private var toolbarRow: some View {
         VStack(alignment: .leading, spacing: 10) {
-            // Headline row with master toggle
+            // Headline + master toggle
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Equalizer")
@@ -85,23 +58,19 @@ struct EQTabView: View {
                         .foregroundColor(.secondary)
                 }
                 Spacer()
-
                 Toggle("", isOn: Binding(
                     get: { !profileManager.isProcessingBypassed },
-                    set: { enabled in
-                        profileManager.setProcessingBypassed(!enabled)
-                    }
+                    set: { enabled in profileManager.setProcessingBypassed(!enabled) }
                 ))
-                    .toggleStyle(.switch)
-                    .labelsHidden()
-                    .help("Master EQ toggle — disables all audio processing when off")
-
+                .toggleStyle(.switch)
+                .labelsHidden()
+                .help("Master EQ toggle — disables all audio processing when off")
             }
 
-            // Device picker + bypass + reset on same row
+            // Device picker + EQ active badge + reset
             HStack {
-                Picker("Device", selection: $selectedDeviceID) {
-                    ForEach(outputDevices) { device in
+                Picker("Device", selection: $vm.selectedDeviceID) {
+                    ForEach(vm.outputDevices) { device in
                         Text(device.name).tag(Optional(device.id))
                     }
                 }
@@ -109,8 +78,7 @@ struct EQTabView: View {
 
                 Spacer()
 
-                // EQ active indicator
-                if let id = selectedDeviceID, eqStore.activeEQ(for: id) != nil {
+                if let id = vm.selectedDeviceID, eqStore.activeEQ(for: id) != nil {
                     Text("EQ Active")
                         .font(.caption2)
                         .fontWeight(.medium)
@@ -121,9 +89,8 @@ struct EQTabView: View {
                         .clipShape(Capsule())
                 }
 
-                // Reset to flat
                 Button {
-                    guard let id = selectedDeviceID else { return }
+                    guard let id = vm.selectedDeviceID else { return }
                     eqStore.setSettings(.flat, for: id)
                     eqStore.setMode(.custom, for: id)
                     if EQEngineService.shared.isRunning,
@@ -131,50 +98,13 @@ struct EQTabView: View {
                         EQEngineService.shared.stopSafe(switchTo: id)
                     }
                 } label: {
-                    Text("Reset")
-                        .font(.caption)
+                    Text("Reset").font(.caption)
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                .disabled(selectedDeviceID == nil || eqStore.settings(for: selectedDeviceID ?? "").isFlat)
+                .disabled(vm.selectedDeviceID == nil || eqStore.settings(for: vm.selectedDeviceID ?? "").isFlat)
             }
         }
-    }
-
-    // MARK: - Device management
-
-    /// Initial load — runs on a background queue to avoid blocking main thread.
-    private func refreshDevices() {
-        DispatchQueue.global(qos: .userInitiated).async {
-            let devices = AudioDeviceFactory.getCurrentDevices()
-                .filter(\.isOutput)
-                .sorted { $0.name < $1.name }
-            let defaultUID = AudioDeviceControlService().getDefaultOutputDevice()?.id
-            DispatchQueue.main.async {
-                outputDevices = devices
-                autoSelectDevice(defaultDeviceUID: defaultUID)
-            }
-        }
-    }
-
-    /// Pick the best device. `defaultDeviceUID` is resolved off the main thread.
-    private func autoSelectDevice(defaultDeviceUID: String? = nil) {
-        guard !outputDevices.isEmpty else { return }
-        // When EQ is running, the system default output is the virtual device.
-        // Use the EQ engine's target UID to find the real device behind it.
-        if EQEngineService.shared.isRunning,
-           let targetUID = EQEngineService.shared.targetDeviceUID,
-           outputDevices.contains(where: { $0.id == targetUID }) {
-            selectedDeviceID = targetUID
-            return
-        }
-        // Use the system default output if available
-        if let uid = defaultDeviceUID, outputDevices.contains(where: { $0.id == uid }) {
-            selectedDeviceID = uid
-            return
-        }
-        // Fall back to first available device
-        selectedDeviceID = outputDevices.first?.id
     }
 
     // MARK: - Banners
@@ -200,57 +130,31 @@ struct EQTabView: View {
     }
 
     private var installBanner: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "waveform.path.ecg.rectangle")
-                .foregroundColor(.blue)
-                .font(.title3)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("EQ requires a one-time setup")
-                    .font(.subheadline).fontWeight(.medium)
-                Text("Install the audio component to enable EQ on any device.")
-                    .font(.caption).foregroundColor(.secondary)
-            }
-            Spacer()
-            Button("Install…") { showingInstallSheet = true }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
+        bannerRow(
+            icon: "waveform.path.ecg.rectangle", iconColor: .blue,
+            title: "EQ requires a one-time setup",
+            subtitle: "Install the audio component to enable EQ on any device.",
+            bgColor: .blue
+        ) {
+            Button("Install…") { showingInstallSheet = true }.buttonStyle(.borderedProminent).controlSize(.small)
         }
-        .padding(12)
-        .background(Color.blue.opacity(0.07))
-        .cornerRadius(10)
-        .padding(.top, 4)
     }
 
     private var repairBanner: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundColor(.orange)
-                .font(.title3)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Audio driver not active")
-                    .font(.subheadline).fontWeight(.medium)
-                Text("Driver is installed but coreaudiod hasn't loaded it yet.")
-                    .font(.caption).foregroundColor(.secondary)
-            }
-            Spacer()
-            Button("Restart Audio Engine") {
-                installService.repair { _ in }
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.small)
+        bannerRow(
+            icon: "exclamationmark.triangle.fill", iconColor: .orange,
+            title: "Audio driver not active",
+            subtitle: "Driver is installed but coreaudiod hasn't loaded it yet.",
+            bgColor: .orange
+        ) {
+            Button("Restart Audio Engine") { installService.repair { _ in } }.buttonStyle(.borderedProminent).controlSize(.small)
         }
-        .padding(12)
-        .background(Color.orange.opacity(0.07))
-        .cornerRadius(10)
-        .padding(.top, 4)
     }
 
     private var installingBanner: some View {
         HStack(spacing: 10) {
             ProgressView().controlSize(.small)
-            Text("Setting up audio driver…")
-                .font(.subheadline)
-                .foregroundColor(.secondary)
+            Text("Setting up audio driver…").font(.subheadline).foregroundColor(.secondary)
             Spacer()
         }
         .padding(12)
@@ -261,51 +165,51 @@ struct EQTabView: View {
 
     @ViewBuilder
     private func updateBanner(_ info: DriverVersionInfo, subtitle: String = "") -> some View {
+        bannerRow(
+            icon: "arrow.down.circle.fill", iconColor: .blue,
+            title: "Driver update available (v\(info.installedVersion) → v\(info.bundledVersion))",
+            subtitle: subtitle.isEmpty ? "A newer driver is bundled with this version of the app." : subtitle,
+            bgColor: .blue
+        ) {
+            Button("Update…") { installService.update { _ in } }.buttonStyle(.borderedProminent).controlSize(.small)
+        }
+    }
+
+    /// Shared banner layout — icon + text + action button.
+    private func bannerRow<Action: View>(
+        icon: String, iconColor: Color,
+        title: String, subtitle: String, bgColor: Color,
+        @ViewBuilder action: () -> Action
+    ) -> some View {
         HStack(spacing: 10) {
-            Image(systemName: "arrow.down.circle.fill")
-                .foregroundColor(.blue)
-                .font(.title3)
+            Image(systemName: icon).foregroundColor(iconColor).font(.title3)
             VStack(alignment: .leading, spacing: 2) {
-                Text("Driver update available (v\(info.installedVersion) → v\(info.bundledVersion))")
-                    .font(.subheadline).fontWeight(.medium)
-                Text(subtitle.isEmpty ? "A newer driver is bundled with this version of the app." : subtitle)
-                    .font(.caption).foregroundColor(.secondary)
+                Text(title).font(.subheadline).fontWeight(.medium)
+                Text(subtitle).font(.caption).foregroundColor(.secondary)
             }
             Spacer()
-            Button("Update…") {
-                installService.update { _ in }
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.small)
+            action()
         }
         .padding(12)
-        .background(Color.blue.opacity(0.07))
+        .background(bgColor.opacity(0.07))
         .cornerRadius(10)
         .padding(.top, 4)
     }
 
-    // MARK: - Empty states
+    // MARK: - Empty States
 
     private var noDeviceSelected: some View {
         VStack(spacing: 10) {
-            Image(systemName: "speaker.slash")
-                .font(.system(size: 32))
-                .foregroundColor(.secondary)
-            Text("No output devices found")
-                .font(.subheadline)
-                .foregroundColor(.secondary)
+            Image(systemName: "speaker.slash").font(.system(size: 32)).foregroundColor(.secondary)
+            Text("No output devices found").font(.subheadline).foregroundColor(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var noDriverState: some View {
         VStack(spacing: 10) {
-            Image(systemName: "waveform.path.ecg.rectangle")
-                .font(.system(size: 32))
-                .foregroundColor(.secondary)
-            Text("Install the audio component to get started")
-                .font(.subheadline)
-                .foregroundColor(.secondary)
+            Image(systemName: "waveform.path.ecg.rectangle").font(.system(size: 32)).foregroundColor(.secondary)
+            Text("Install the audio component to get started").font(.subheadline).foregroundColor(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }

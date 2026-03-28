@@ -157,4 +157,16 @@ class AudioDeviceFactory {
         let stat = AudioObjectGetPropertyDataSize(deviceID, &addr, 0, nil, &size)
         return stat == noErr && size > 0
     }
-} 
+}
+
+// MARK: - AudioDeviceProviding Conformance
+
+/// Thin instance wrapper so AudioDeviceFactory can be used as an AudioDeviceProviding dependency.
+final class AudioDeviceFactoryProvider: AudioDeviceProviding {
+    static let shared = AudioDeviceFactoryProvider()
+    private init() {}
+
+    func getCurrentDevices() -> [AudioDevice] {
+        AudioDeviceFactory.getCurrentDevices()
+    }
+}

@@ -10,7 +10,7 @@ import Foundation
 @MainActor
 final class AudioPipelineService {
 
-    private let deviceControlService = AudioDeviceControlService()
+    private let deviceControlService: AudioDeviceControlServiceProtocol = AudioDeviceControlService()
 
     // MARK: - Apply Pipeline
 

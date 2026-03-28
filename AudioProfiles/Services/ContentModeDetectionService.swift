@@ -93,7 +93,7 @@ final class ContentModeDetectionService: ObservableObject {
         if mode != .none {
             AppLogger.info("Content mode: \(mode.displayName) (source: \(source ?? "none"))")
         }
-        ProfileManager.shared.evaluateAndApply()
+        ProfileManager.shared.pipelineInvalidationSubject.send()
     }
 
     // MARK: - Mic Detection (event-driven via Core Audio listener)
