@@ -36,7 +36,10 @@ struct NightModeConfig: Codable, Equatable {
         let startMinutes = startHour * 60 + self.startMinute
         let endMinutes = endHour * 60 + self.endMinute
 
-        if startMinutes <= endMinutes {
+        // start == end means "always on" (24h night mode)
+        if startMinutes == endMinutes { return true }
+
+        if startMinutes < endMinutes {
             // Same day range (e.g., 08:00 - 22:00)
             return currentMinutes >= startMinutes && currentMinutes < endMinutes
         } else {

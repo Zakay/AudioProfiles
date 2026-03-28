@@ -31,6 +31,10 @@ struct DevicePriorityListView: View {
                         } else {
                             // Fallback for devices not in history (keep custom since it's special case)
                             HStack(spacing: 12) {
+                                Image(systemName: "line.3.horizontal")
+                                    .foregroundColor(.secondary)
+                                    .font(.caption)
+
                                 DeviceDisplayUtils.connectionStatusIndicator(isConnected: false)
                                 
                                 VStack(alignment: .leading, spacing: 2) {
@@ -62,13 +66,18 @@ struct DevicePriorityListView: View {
                     }
                     .onMove(perform: moveItems)
                 } header: {
-                    Text("Priority Order")
-                        .font(.caption)
-                        .fontWeight(.medium)
-                        .foregroundColor(.secondary)
-                        .textCase(nil)
-                        .listRowInsets(EdgeInsets())
-                        .padding(.bottom, 4)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Priority Order")
+                            .font(.caption)
+                            .fontWeight(.medium)
+                            .foregroundColor(.secondary)
+                            .textCase(nil)
+                        Text("Drag to reorder priority")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                    .listRowInsets(EdgeInsets())
+                    .padding(.bottom, 4)
                 }
             }
 

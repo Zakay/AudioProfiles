@@ -106,6 +106,13 @@ final class AudioPipelineService {
         EQDriverService.shared.hide()
     }
 
+    /// Public entry point for early orphan recovery at app startup.
+    /// Called from ProfileManager.initialize() before trigger detection runs,
+    /// so the user gets audio back ASAP after a crash.
+    func recoverOrphanIfNeeded() {
+        recoverOrphanedVirtualDevice(intendedOutputDevice: nil)
+    }
+
     // MARK: - Direct Device Setting (for setActiveProfileWithoutApplying path)
 
     func getDefaultOutputDevice() -> AudioDevice? {

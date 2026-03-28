@@ -34,6 +34,9 @@ struct EQEditorView: View {
                 onChange: applySettingsAsCustom
             )
 
+            // Active layer legend
+            EQLayerLegend(deviceUID: deviceUID)
+
             // Preset row — compact single line
             presetRow
 
@@ -216,6 +219,76 @@ struct EQEditorView: View {
 
     private func dbLabel(_ gain: Float) -> String {
         gain == 0 ? "0.0 dB" : String(format: "%+.1f dB", gain)
+    }
+}
+
+// MARK: - EQ Layer Legend
+
+struct EQLayerLegend: View {
+    let deviceUID: String
+    @ObservedObject private var eqStore = EQStore.shared
+    @ObservedObject private var soundModes = SoundModesStore.shared
+
+    private var hasDeviceEQ: Bool {
+        !eqStore.settings(for: deviceUID).isFlat
+    }
+    private var isBypassed: Bool {
+        eqStore.isBypassed(for: deviceUID)
+    }
+    private var hasOverlay: Bool {
+        !soundModes.activeOverlay().isFlat
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            // L1: Device EQ
+            HStack(spacing: 4) {
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(Color.white.opacity(hasDeviceEQ && !isBypassed ? 0.85 : 0.3))
+                    .frame(width: 16, height: 2)
+                Text("Device EQ")
+                    .font(.caption2)
+                    .foregroundColor(hasDeviceEQ && !isBypassed ? .primary : .secondary)
+            }
+
+            // L2+L3: Overlay
+            HStack(spacing: 4) {
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(Color.teal.opacity(hasOverlay ? 0.7 : 0.3))
+                    .frame(width: 16, height: 2)
+                Text(overlayLabel)
+                    .font(.caption2)
+                    .foregroundColor(hasOverlay ? .primary : .secondary)
+            }
+
+            // Bypass indicator
+            if isBypassed {
+                HStack(spacing: 3) {
+                    Image(systemName: "pause.circle.fill")
+                        .font(.system(size: 8))
+                        .foregroundColor(.orange)
+                    Text("Bypassed")
+                        .font(.caption2)
+                        .foregroundColor(.orange)
+                }
+            }
+
+            Spacer()
+        }
+        .padding(.horizontal, 4)
+        .padding(.vertical, 2)
+    }
+
+    private var overlayLabel: String {
+        var parts: [String] = []
+        if soundModes.isEnabled && soundModes.activeContentMode != .none {
+            parts.append(soundModes.activeContentMode.displayName)
+        }
+        if soundModes.nightMode.isEnabled && soundModes.isNightModeActive {
+            parts.append("Night")
+        }
+        if parts.isEmpty { return "Overlay" }
+        return parts.joined(separator: " + ")
     }
 }
 
@@ -564,6 +637,14 @@ struct InteractiveEQGraphView: View {
             }
         }
         .frame(height: 220)
+        .overlay(alignment: .trailing) {
+            if EQEngineService.shared.isRunning {
+                LevelMeterView()
+                    .frame(width: 20)
+                    .padding(.trailing, 4)
+                    .padding(.vertical, 8)
+            }
+        }
     }
 
     // MARK: - Layout
@@ -1098,5 +1179,42 @@ private struct FeatureRow: View {
             Image(systemName: icon).frame(width: 20).foregroundColor(.blue)
             Text(text).font(.callout).fixedSize(horizontal: false, vertical: true)
         }
+    }
+}
+
+// MARK: - Level Meter (F7)
+
+struct LevelMeterView: View {
+    @ObservedObject private var monitor = AudioLevelMonitor.shared
+
+    var body: some View {
+        HStack(spacing: 2) {
+            LevelBar(level: CGFloat(monitor.leftLevel))
+            LevelBar(level: CGFloat(monitor.rightLevel))
+        }
+    }
+}
+
+struct LevelBar: View {
+    let level: CGFloat
+
+    var body: some View {
+        GeometryReader { geo in
+            VStack(spacing: 0) {
+                Spacer()
+                Rectangle()
+                    .fill(
+                        LinearGradient(
+                            colors: [.green, .green, .yellow, .red],
+                            startPoint: .bottom,
+                            endPoint: .top
+                        )
+                    )
+                    .frame(height: geo.size.height * min(level, 1.0))
+            }
+        }
+        .frame(width: 4)
+        .background(Color.white.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 2))
     }
 }

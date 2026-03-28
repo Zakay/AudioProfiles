@@ -391,6 +391,31 @@ launch_app() {
     open "/Applications/${APP_PROJECT_NAME}.app"
 }
 
+# ── Unit Tests ────────────────────────────────────────────────────────────
+run_tests() {
+    print_step "Running unit tests..."
+
+    local test_dir="${WORK_DIR}/Tests"
+    local any_failed=false
+
+    for test_file in "${test_dir}"/*.swift; do
+        [[ -f "$test_file" ]] || continue
+        local test_name
+        test_name=$(basename "$test_file")
+        print_status "  Running ${test_name}..."
+        if ! swift "$test_file" 2>&1 | tail -5; then
+            print_error "  ${test_name} FAILED"
+            any_failed=true
+        fi
+    done
+
+    if [[ "$any_failed" == true ]]; then
+        print_error "Unit tests failed — aborting build."
+        exit 1
+    fi
+    print_success "All unit tests passed."
+}
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 main() {
     echo ""
@@ -427,6 +452,9 @@ main() {
         print_status "Driver bundle: $driver_path"
         return 0
     fi
+
+    # Run unit tests before building
+    run_tests
 
     # Build the main app
     build_app

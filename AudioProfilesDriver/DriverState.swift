@@ -136,7 +136,7 @@ final class DriverState: @unchecked Sendable {
     /// so perceived loudness matches between virtual and real devices.
     var ioGain: Float32 {
         if isMuted || volumeScalar <= 0 { return 0.0 }
-        return volumeScalar * volumeScalar * volumeScalar
+        return volumeScalar * volumeScalar
     }
 
     // MARK: IO state

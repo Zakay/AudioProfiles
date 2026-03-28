@@ -5,6 +5,7 @@ struct ConfigurationView: View {
     @Environment(\.dismiss) var dismiss
     @StateObject private var profileManager = ProfileManager.shared
     @AppStorage("launchAtLogin") private var launchAtLogin = false
+    @AppStorage("showAutoSwitchNotifications") private var showNotifications = true
     @State private var showAddProfileSheet = false
     @State private var profileToEdit: Profile? = nil
     @State private var profileToDelete: Profile? = nil
@@ -58,16 +59,29 @@ struct ConfigurationView: View {
             // Profiles List Section
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
-                    Text("Audio Profiles")
-                        .font(.title2)
-                        .fontWeight(.semibold)
-                    Spacer()
-                    Button {
-                        showAddProfileSheet = true
-                    } label: {
-                        Label("Add Profile", systemImage: "plus")
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Audio Profiles")
+                            .font(.title2)
+                            .fontWeight(.semibold)
+                        Text("Auto-switch based on connected devices")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
                     }
-                    .buttonStyle(.borderedProminent)
+                    Spacer()
+
+                    Toggle("", isOn: Binding(
+                        get: { !profileManager.isAutoSwitchingDisabled },
+                        set: { enabled in
+                            if enabled {
+                                profileManager.enableAutoSwitching()
+                            } else {
+                                profileManager.disableAutoSwitching()
+                            }
+                        }
+                    ))
+                        .toggleStyle(.switch)
+                        .labelsHidden()
+                        .help("Auto-switch profiles when devices connect/disconnect")
                 }
                 
                 List {
@@ -90,18 +104,6 @@ struct ConfigurationView: View {
                                     
                                     // Only show pills for non-system default profiles
                                     if !profile.isSystemDefault {
-                                        // Hotkey badge
-                                        if let hotkey = profile.hotkey {
-                                            Text(hotkey.description)
-                                                .font(.caption2)
-                                                .fontWeight(.medium)
-                                                .padding(.horizontal, 8)
-                                                .padding(.vertical, 3)
-                                                .background(Color.gray.opacity(0.2))
-                                                .foregroundColor(.primary)
-                                                .cornerRadius(6)
-                                        }
-                                        
                                         // Preferred mode badge
                                         HStack(spacing: 4) {
                                             Image(systemName: profile.preferredMode == .public ? "speaker.wave.2" : "headphones")
@@ -116,7 +118,7 @@ struct ConfigurationView: View {
                                         .cornerRadius(6)
                                         
                                         // Trigger status badge with device name
-                                        if profile.triggerDeviceIDs.isEmpty {
+                                        if profile.triggerRules.isEmpty {
                                             HStack(spacing: 4) {
                                                 Image(systemName: "bolt.slash")
                                                     .font(.caption2)
@@ -160,19 +162,14 @@ struct ConfigurationView: View {
                             
                             Spacer()
                             
-                            // Show Add Profile button for System Default when it's the only profile
-                            if profile.isSystemDefault && profileManager.profiles.count == 1 {
+                            if profile.isSystemDefault {
                                 Button {
                                     showAddProfileSheet = true
                                 } label: {
-                                    Image(systemName: "plus")
-                                        .font(.system(size: 16, weight: .medium))
+                                    Label("Add Profile", systemImage: "plus")
                                 }
-                                .buttonStyle(.bordered)
-                                .help("Add your first profile")
-                            }
-                            // Only show Edit button for non-system default profiles
-                            else if !profile.isSystemDefault {
+                                .buttonStyle(.borderedProminent)
+                            } else {
                                 Button {
                                     profileToEdit = profile
                                 } label: {
@@ -183,6 +180,7 @@ struct ConfigurationView: View {
                         }
                         .padding(.vertical, 8)
                         .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+                        .listRowSeparator(.hidden)
                         .contextMenu {
                             // Only show delete option for non-system default profiles
                             if !profile.isSystemDefault {
@@ -241,11 +239,17 @@ struct ConfigurationView: View {
                     }
                     Spacer()
                 }
+
+                HStack {
+                    Toggle("Show notification when profile switches", isOn: $showNotifications)
+                    Spacer()
+                }
+
             }
             .padding()
             .background(Color(NSColor.controlBackgroundColor))
             .cornerRadius(12)
-            
+
         }
         .padding(.horizontal)
         .padding(.bottom)

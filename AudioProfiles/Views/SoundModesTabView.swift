@@ -33,22 +33,21 @@ struct SoundModesTabView: View {
 
                 // Mode list with Edit buttons
                 modesList
-
-                Divider()
-
-                // Night mode
-                nightModeSection
             } else {
                 // Feature description when disabled
                 VStack(alignment: .leading, spacing: 8) {
                     Label("Voice calls get speech clarity boost", systemImage: "mic.fill")
                     Label("Movies get cinematic bass and dialogue clarity", systemImage: "film")
-                    Label("Night mode reduces bass during quiet hours", systemImage: "moon.fill")
                 }
                 .font(.caption)
                 .foregroundColor(.secondary)
                 .padding(.vertical, 8)
             }
+
+            Divider()
+
+            // Night mode — always visible, independent of Content Modes toggle
+            nightModeSection
 
             Spacer()
         }

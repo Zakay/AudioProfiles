@@ -40,7 +40,6 @@ struct DemoProfileListView: View {
         DemoProfile(
             name: "Work Setup",
             icon: "briefcase",
-            hotkey: "⌘⌥1",
             mode: "Public",
             outputDevice: "Studio Display Speakers",
             inputDevice: "MacBook Pro Microphone",
@@ -50,7 +49,6 @@ struct DemoProfileListView: View {
         DemoProfile(
             name: "Gaming",
             icon: "gamecontroller",
-            hotkey: "⌘⌥2", 
             mode: "Private",
             outputDevice: "SteelSeries Arctis 7",
             inputDevice: "SteelSeries Arctis 7",
@@ -60,7 +58,6 @@ struct DemoProfileListView: View {
         DemoProfile(
             name: "Music Production",
             icon: "music.note",
-            hotkey: "⌘⌥3",
             mode: "Private",
             outputDevice: "Audio-Technica ATH-M50x",
             inputDevice: "Blue Yeti Nano",
@@ -70,7 +67,6 @@ struct DemoProfileListView: View {
         DemoProfile(
             name: "Video Calls",
             icon: "video",
-            hotkey: "⌘⌥4",
             mode: "Private",
             outputDevice: "AirPods Pro",
             inputDevice: "AirPods Pro",
@@ -80,10 +76,9 @@ struct DemoProfileListView: View {
         DemoProfile(
             name: "System Default",
             icon: "speaker.wave.2",
-            hotkey: "",
             mode: "Public",
             outputDevice: "Default",
-            inputDevice: "Default", 
+            inputDevice: "Default",
             triggerDevice: "",
             hasTrigger: false
         )
@@ -172,18 +167,6 @@ struct DemoProfileRow: View {
                         .font(.headline)
                     
                     if profile.name != "System Default" {
-                        // Hotkey badge
-                        if !profile.hotkey.isEmpty {
-                            Text(profile.hotkey)
-                                .font(.caption2)
-                                .fontWeight(.medium)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 3)
-                                .background(Color.gray.opacity(0.2))
-                                .foregroundColor(.primary)
-                                .cornerRadius(6)
-                        }
-                        
                         // Mode badge
                         HStack(spacing: 4) {
                             Image(systemName: profile.mode == "Public" ? "speaker.wave.2" : "headphones")
@@ -514,7 +497,6 @@ struct DemoProfileEditorView: View {
     @State private var profileName: String = ""
     @State private var selectedIcon = "briefcase"
     @State private var selectedMode = "Public"
-    @State private var hotkeyEnabled = true
     
     let icons = ["briefcase", "gamecontroller", "music.note", "video", "headphones", "speaker.wave.2", "mic", "tv"]
     let demoDevices = [
@@ -646,27 +628,6 @@ struct DemoProfileEditorView: View {
                     }
                 }
                 
-                // Hotkey Configuration
-                VStack(alignment: .leading) {
-                    Toggle("Enable Hotkey", isOn: $hotkeyEnabled)
-                        .font(.headline)
-                    
-                    if hotkeyEnabled {
-                        HStack {
-                            Text("Hotkey:")
-                            Spacer()
-                            Text("⌘⌥2")
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 6)
-                                .background(Color.gray.opacity(0.1))
-                                .cornerRadius(6)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 6)
-                                        .stroke(Color.gray.opacity(0.3), lineWidth: 1)
-                                )
-                        }
-                    }
-                }
             }
             
             Spacer()
@@ -682,18 +643,16 @@ struct DemoProfileEditorView: View {
 struct DemoProfile {
     let name: String
     let icon: String
-    let hotkey: String
     let mode: String
     let outputDevice: String
     let inputDevice: String
     let triggerDevice: String
     let hasTrigger: Bool
-    
+
     static func newProfile() -> DemoProfile {
         return DemoProfile(
             name: "New Profile",
             icon: "briefcase",
-            hotkey: "",
             mode: "Public",
             outputDevice: "Default",
             inputDevice: "Default",

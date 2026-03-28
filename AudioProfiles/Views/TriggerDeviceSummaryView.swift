@@ -1,12 +1,12 @@
 import SwiftUI
 
 struct TriggerDeviceSummaryView: View {
-    @Binding var selectedDeviceIDs: [String]
+    @Binding var triggerRules: [TriggerRule]
     @State private var showingSelectionSheet = false
-    
+
     // Use new consolidated service
     private let deviceFilterService = DeviceFilterService()
-    
+
     var body: some View {
         Button(action: {
             showingSelectionSheet = true
@@ -20,7 +20,7 @@ struct TriggerDeviceSummaryView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                
+
                 Image(systemName: "chevron.right")
                     .font(.caption)
                     .foregroundColor(.secondary)
@@ -34,26 +34,32 @@ struct TriggerDeviceSummaryView: View {
         .background(Color(NSColor.controlBackgroundColor))
         .cornerRadius(6)
         .sheet(isPresented: $showingSelectionSheet) {
-            TriggerDeviceSelectionView(selectedDeviceIDs: $selectedDeviceIDs)
+            TriggerDeviceSelectionView(triggerRules: $triggerRules)
         }
     }
-    
+
     private var summaryText: String {
-        if selectedDeviceIDs.isEmpty {
+        if triggerRules.isEmpty {
             return "None"
         }
-        
-        // Get device names, filtering out unknown devices
-        let deviceNames = selectedDeviceIDs.compactMap { deviceId in
-            deviceFilterService.getDevice(by: deviceId)?.name
+
+        var parts: [String] = []
+
+        for rule in triggerRules {
+            switch rule {
+            case .specificDevice(let id):
+                if let device = deviceFilterService.getDevice(by: id) {
+                    parts.append(device.name)
+                }
+            case .transportType(let type):
+                parts.append("Any \(type)")
+            }
         }
-        
-        // Handle case where some device IDs couldn't be resolved
-        if deviceNames.isEmpty {
-            return "\(selectedDeviceIDs.count) device\(selectedDeviceIDs.count == 1 ? "" : "s") selected"
+
+        if parts.isEmpty {
+            return "\(triggerRules.count) rule\(triggerRules.count == 1 ? "" : "s") selected"
         }
-        
-        // Use consolidated device name formatting utility
-        return DeviceDisplayUtils.formatDeviceNames(deviceNames)
+
+        return DeviceDisplayUtils.formatDeviceNames(parts)
     }
-} 
+}

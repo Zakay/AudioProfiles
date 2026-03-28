@@ -631,7 +631,8 @@ struct GettingStartedVisual: View {
                 StepView(number: 1, text: "Create your first profile", icon: "plus.circle.fill")
                 StepView(number: 2, text: "Set device priorities", icon: "list.bullet")
                 StepView(number: 3, text: "Configure triggers", icon: "bolt.fill")
-                StepView(number: 4, text: "Enjoy automatic switching!", icon: "checkmark.circle.fill")
+                StepView(number: 4, text: "Set up keyboard shortcuts for instant profile switching", icon: "keyboard.fill")
+                StepView(number: 5, text: "Enjoy automatic switching!", icon: "checkmark.circle.fill")
             }
         }
     }

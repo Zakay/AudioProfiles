@@ -1,23 +1,7 @@
 import Foundation
 import Combine
 
-/// Duration options for disabling auto-switching
-enum AutoSwitchingDisableDuration {
-    case hours(Int)
-    case untilEndOfDay
-    case forever
-
-    var displayName: String {
-        switch self {
-        case .hours(let count):
-            return "\(count)h"
-        case .untilEndOfDay:
-            return "End of Day"
-        case .forever:
-            return "Forever"
-        }
-    }
-}
+// AutoSwitchingDisableDuration removed — auto-switching is now a simple on/off toggle.
 
 /// Central coordinating service that orchestrates all profile operations
 ///
@@ -44,17 +28,40 @@ class ProfileManager: ObservableObject {
     @Published private(set) var activeProfile: Profile?
     @Published private(set) var activeMode: ProfileMode = .public
     @Published private(set) var activeOutputDeviceName: String?
+    @Published private(set) var activeOutputDeviceUID: String?
     @Published private(set) var activeInputDeviceName: String?
+
+    struct LastTriggerEvent {
+        let profileName: String
+        let profileID: UUID
+        let triggerDeviceName: String
+        let timestamp: Date
+        let wasAutomatic: Bool
+
+        var timeAgo: String {
+            let interval = Date().timeIntervalSince(timestamp)
+            if interval < 60 { return "Just now" }
+            if interval < 3600 { return "\(Int(interval / 60))m ago" }
+            if interval < 86400 { return "\(Int(interval / 3600))h ago" }
+            return "\(Int(interval / 86400))d ago"
+        }
+    }
+
+    @Published private(set) var lastTriggerEvent: LastTriggerEvent?
+    @Published var isProcessingBypassed: Bool = false
+
+    func setProcessingBypassed(_ bypassed: Bool) {
+        isProcessingBypassed = bypassed
+        UserDefaults.standard.set(bypassed, forKey: "com.audioprofiles.processingBypassed")
+        evaluateAndApply()
+    }
     @Published private(set) var isAutoSwitchingDisabled: Bool = false
-    @Published private(set) var autoSwitchingDisabledUntil: Date?
-    @Published private(set) var remainingDisableTime: String?
 
-    // Timestamp-based manual override tracking
-    private var lastManualSwitchTimestamp: Date?
+    // Timestamp-based manual override tracking — persisted so force-quit doesn't lose it
+    private var lastManualSwitchTimestamp: Date? {
+        didSet { UserDefaults.standard.set(lastManualSwitchTimestamp?.timeIntervalSince1970, forKey: "lastManualSwitchTimestamp") }
+    }
 
-    // Auto-switching disable timer
-    private var autoSwitchingTimer: Timer?
-    private var displayUpdateTimer: Timer?
 
     // MARK: - evaluateAndApply state
 
@@ -81,17 +88,32 @@ class ProfileManager: ObservableObject {
     // MARK: - Initialization
 
     private func initialize() {
+        // Restore persisted manual switch timestamp (survives force-quit)
+        if let ts = UserDefaults.standard.object(forKey: "lastManualSwitchTimestamp") as? Double {
+            lastManualSwitchTimestamp = Date(timeIntervalSince1970: ts)
+        }
+
+        // Restore persisted processing bypass state
+        isProcessingBypassed = UserDefaults.standard.bool(forKey: "com.audioprofiles.processingBypassed")
+
         // Load profiles from UserDefaults (no Core Audio calls — safe during init)
         loadProfiles()
 
         // Set System Default immediately so UI has state before trigger detection runs.
         if !profiles.isEmpty {
-            if let systemDefault = profiles.first(where: { $0.name == "System Default" }) {
+            if let systemDefault = profiles.first(where: { $0.isSystemDefault }) {
                 setActiveProfileWithoutApplying(systemDefault, restoredMode: getSavedMode(for: systemDefault.id))
             } else {
                 let first = profiles.first!
                 setActiveProfileWithoutApplying(first, restoredMode: getSavedMode(for: first.id))
             }
+        }
+
+        // Early orphan recovery: if the app crashed with our virtual device as
+        // system default, switch back immediately so the user has audio.
+        // This runs before trigger detection to minimize silent-output time.
+        DispatchQueue.main.async {
+            AudioPipelineService().recoverOrphanIfNeeded()
         }
 
         // Defer trigger detection to after init completes — ProfileTriggerService
@@ -112,7 +134,7 @@ class ProfileManager: ObservableObject {
 
                     // If no profile was activated by triggers, fall back to System Default
                     if self.activeProfile == nil && !self.profiles.isEmpty {
-                        if let systemDefault = self.profiles.first(where: { $0.name == "System Default" }) {
+                        if let systemDefault = self.profiles.first(where: { $0.isSystemDefault }) {
                             AppLogger.info("No trigger matched — activating System Default profile")
                             self.activateProfile(with: systemDefault.id)
                         } else {
@@ -254,7 +276,12 @@ class ProfileManager: ObservableObject {
 
         let baseEQ = EQStore.shared.settings(for: outputUID)
         let overlay = SoundModesStore.shared.activeOverlay()
-        let effectiveEQ = EQSettings.combine(base: baseEQ, overlay: overlay)
+        var effectiveEQ = EQSettings.combine(base: baseEQ, overlay: overlay)
+
+        // 6b. Bypass check — flatten EQ when global bypass or per-device bypass is active
+        if isProcessingBypassed {
+            effectiveEQ = .flat
+        }
 
         // 7. Determine if virtual driver is needed
         let needsVirtualDriver = !effectiveEQ.isFlat && EQInstallationService.shared.isInstalled
@@ -289,104 +316,31 @@ class ProfileManager: ObservableObject {
 
         // 11. Update published state for UI
         activeOutputDeviceName = resolvedOutputDevice?.name
+        activeOutputDeviceUID = resolvedOutputUID
         activeInputDeviceName = resolvedInputDevice?.name
     }
 
     // MARK: - Auto-Switching Disable Management
 
-    func disableAutoSwitching(for duration: AutoSwitchingDisableDuration) {
-        let endDate: Date?
-
-        switch duration {
-        case .forever:
-            endDate = nil
-        case .untilEndOfDay:
-            let calendar = Calendar.current
-            let today = Date()
-            endDate = calendar.dateInterval(of: .day, for: today)?.end
-        case .hours(let hours):
-            endDate = Date().addingTimeInterval(TimeInterval(hours * 3600))
-        }
-
+    func disableAutoSwitching() {
         isAutoSwitchingDisabled = true
-        autoSwitchingDisabledUntil = endDate
-
-        // Clear manual override - intentional disable takes precedence
         clearManualOverride()
-
-        // Clear existing timers
-        autoSwitchingTimer?.invalidate()
-        displayUpdateTimer?.invalidate()
-        autoSwitchingTimer = nil
-        displayUpdateTimer = nil
-
-        // Set up timer for re-enabling if not disabled forever
-        if let endDate = endDate {
-            let timeInterval = endDate.timeIntervalSinceNow
-            if timeInterval > 0 {
-                // Timer to re-enable auto-switching
-                autoSwitchingTimer = Timer.scheduledTimer(withTimeInterval: timeInterval, repeats: false) { [weak self] _ in
-                    self?.enableAutoSwitching()
-                }
-
-                // Timer to update display every minute
-                displayUpdateTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
-                    self?.updateRemainingTimeDisplay()
-                }
-
-                // Initial update
-                updateRemainingTimeDisplay()
-            }
-        } else {
-            remainingDisableTime = nil
-        }
-
-        AppLogger.info("Auto-switching disabled until: \(endDate?.description ?? "forever")")
+        AppLogger.info("Auto-switching disabled")
     }
 
     func enableAutoSwitching() {
         isAutoSwitchingDisabled = false
-        autoSwitchingDisabledUntil = nil
-        remainingDisableTime = nil
-
-        // Clear timers
-        autoSwitchingTimer?.invalidate()
-        displayUpdateTimer?.invalidate()
-        autoSwitchingTimer = nil
-        displayUpdateTimer = nil
-
-        // Trigger auto-detection now that it's re-enabled
         ProfileTriggerService.shared.triggerAutoDetection()
-
         AppLogger.info("Auto-switching re-enabled")
     }
 
-    private func updateRemainingTimeDisplay() {
-        guard isAutoSwitchingDisabled, let endDate = autoSwitchingDisabledUntil else {
-            remainingDisableTime = nil
-            return
-        }
-
-        let timeInterval = endDate.timeIntervalSinceNow
-        if timeInterval <= 0 {
-            // Time expired, enable auto-switching
-            enableAutoSwitching()
-            return
-        }
-
-        let hours = Int(timeInterval) / 3600
-        let minutes = Int(timeInterval.truncatingRemainder(dividingBy: 3600)) / 60
-
-        if hours > 0 {
-            remainingDisableTime = "\(hours)h \(minutes)m"
-        } else {
-            remainingDisableTime = "\(minutes)m"
-        }
+    // Kept for backward compatibility — callers that used duration-based disable
+    func disableAutoSwitching(for duration: Any) {
+        disableAutoSwitching()
     }
 
-    func getRemainingDisableTime() -> String? {
-        return remainingDisableTime
-    }
+    // updateRemainingTimeDisplay and getRemainingDisableTime removed —
+    // auto-switching is now a simple on/off toggle with no timed duration.
 
     /// Check if a trigger should be applied based on device connection timestamps
     /// Returns true if the trigger device was connected after the last manual switch
@@ -417,12 +371,24 @@ class ProfileManager: ObservableObject {
     // MARK: - Profile Management API
 
     /// Called by ProfileTriggerService when a trigger matches a profile.
-    func activateProfileFromTrigger(id: UUID) {
+    func activateProfileFromTrigger(id: UUID, triggerDeviceName: String? = nil) {
         // Only activate profile if auto-switching is not disabled
         guard !isAutoSwitchingDisabled else {
             AppLogger.info("Ignoring trigger event - auto-switching is disabled")
             return
         }
+
+        // Record trigger event for diagnostics before activation
+        if let profile = getProfile(by: id) {
+            lastTriggerEvent = LastTriggerEvent(
+                profileName: profile.name,
+                profileID: profile.id,
+                triggerDeviceName: triggerDeviceName ?? "Auto",
+                timestamp: Date(),
+                wasAutomatic: true
+            )
+        }
+
         activateProfile(with: id)
     }
 
@@ -456,6 +422,15 @@ class ProfileManager: ObservableObject {
             lastManualSwitchTimestamp = Date()
             AppLogger.info("Manual profile selection: '\(profile.name)' - timestamp recorded")
             notificationService.notifyManualSwitch(profileName: profile.name)
+
+            // Record manual trigger event for diagnostics
+            lastTriggerEvent = LastTriggerEvent(
+                profileName: profile.name,
+                profileID: profile.id,
+                triggerDeviceName: "Manual",
+                timestamp: Date(),
+                wasAutomatic: false
+            )
         } else {
             // Automatic selection - clear manual override
             lastManualSwitchTimestamp = nil
@@ -490,7 +465,6 @@ class ProfileManager: ObservableObject {
             publicInputPriority: [],
             privateOutputPriority: [],
             privateInputPriority: [],
-            hotkey: nil,
             preferredMode: .public
         )
     }
@@ -508,12 +482,6 @@ class ProfileManager: ObservableObject {
         // Ensure proper ordering (System Default first)
         profiles = ensureSystemDefaultFirst(profiles)
         saveProfiles()
-
-        // Handle hotkey changes using HotkeyCoordinator
-        HotkeyCoordinator.shared.handleHotkeyChanges(
-            oldHotkey: oldProfile?.hotkey,
-            newHotkey: profile.hotkey
-        )
 
         // Refresh the active profile if we just edited it.
         if activeProfile?.id == profile.id {
@@ -534,9 +502,6 @@ class ProfileManager: ObservableObject {
     }
 
     func remove(profileID: UUID) {
-        // Get the profile before removal to check for hotkey cleanup
-        let profileToRemove = getProfile(by: profileID)
-
         // If this is the active profile, deactivate it
         if activeProfile?.id == profileID {
             activeProfile = nil
@@ -544,32 +509,17 @@ class ProfileManager: ObservableObject {
         profiles.removeAll { $0.id == profileID }
         saveProfiles()
 
-        // Clean up hotkey if the removed profile had one
-        if profileToRemove?.hotkey != nil {
-            HotkeyCoordinator.shared.refreshHotkeys()
-        }
-
         // Auto-trigger detection after profile removal
         ProfileTriggerService.shared.triggerAutoDetection()
     }
 
     func deleteProfiles(at offsets: IndexSet) {
-        // Check if any profiles being deleted have hotkeys
-        let profilesToDelete = offsets.map { profiles[$0] }
-        let hasHotkeys = profilesToDelete.contains { $0.hotkey != nil }
-
         profiles.remove(atOffsets: offsets)
         saveProfiles()
-
-        // Refresh hotkeys if any deleted profiles had hotkeys
-        if hasHotkeys {
-            HotkeyCoordinator.shared.refreshHotkeys()
-        }
     }
 
     func save() {
         saveProfiles()
-        HotkeyCoordinator.shared.refreshHotkeys()
     }
 
     private func periodicCleanup() {
@@ -649,7 +599,7 @@ class ProfileManager: ObservableObject {
         var finalProfiles = cleanedProfiles
 
         // Ensure we always have a System Default profile
-        let hasSystemDefault = finalProfiles.contains { $0.name == "System Default" }
+        let hasSystemDefault = finalProfiles.contains { $0.isSystemDefault }
         if !hasSystemDefault {
             AppLogger.info("No System Default profile found, creating one")
             let systemDefaultProfile = Profile(
@@ -661,8 +611,8 @@ class ProfileManager: ObservableObject {
                 publicInputPriority: [],
                 privateOutputPriority: [],
                 privateInputPriority: [],
-                hotkey: nil,
-                preferredMode: .public
+                preferredMode: .public,
+                isSystemDefault: true
             )
             finalProfiles.append(systemDefaultProfile)
         }

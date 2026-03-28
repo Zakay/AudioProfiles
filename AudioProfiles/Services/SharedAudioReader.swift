@@ -157,6 +157,7 @@ final class SharedAudioReader {
         if writeIdx >= readIndex {
             available = Int(writeIdx - readIndex)
         } else {
+            AppLogger.warning("SharedAudioReader: driver reset detected (writeIdx \(writeIdx) < readIndex \(readIndex)) — resyncing, possible audio glitch")
             readIndex = writeIdx
             available = 0
         }
@@ -164,6 +165,7 @@ final class SharedAudioReader {
         // If we've fallen behind by more than the ring capacity, resync
         // (the oldest data has been overwritten)
         if available > frameCapacity {
+            AppLogger.warning("SharedAudioReader: fell behind by \(available) frames (capacity \(frameCapacity)) — resyncing, dropped \(available - frameCapacity) frames")
             readIndex = writeIdx - UInt64(frameCapacity)
             available = frameCapacity
         }

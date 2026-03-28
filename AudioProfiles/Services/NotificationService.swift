@@ -25,12 +25,18 @@ class NotificationService {
         }
     }
     
+    /// Whether auto-switch notifications are enabled by the user
+    private var isEnabled: Bool {
+        UserDefaults.standard.bool(forKey: "showAutoSwitchNotifications")
+    }
+
     /// Show notification for triggered profile switch
     /// - Parameters:
     ///   - profileName: Name of the activated profile
     ///   - triggerDevice: Device that triggered the switch
     ///   - matchCount: Number of trigger devices matched
     func notifyTriggeredSwitch(profileName: String, triggerDevice: String, matchCount: Int) {
+        guard isEnabled else { return }
         let content = UNMutableNotificationContent()
         content.title = "Switched to '\(profileName)'"
         
@@ -40,7 +46,7 @@ class NotificationService {
             content.body = "\(triggerDevice) and \(matchCount - 1) other devices connected"
         }
         
-        showNotification(content: content, identifier: "triggered-switch")
+        showNotification(content: content, identifier: "triggered-switch-\(UUID().uuidString)")
     }
     
     /// Show notification for fallback to System Default
@@ -48,6 +54,7 @@ class NotificationService {
     ///   - profileName: Name of the profile we switched to (should be "System Default")
     ///   - lostTriggerDevice: Device that was disconnected causing the fallback
     func notifyFallbackSwitch(profileName: String, lostTriggerDevice: String?) {
+        guard isEnabled else { return }
         let content = UNMutableNotificationContent()
         content.title = "Switched to '\(profileName)'"
         
@@ -57,17 +64,18 @@ class NotificationService {
             content.body = "No trigger devices connected"
         }
         
-        showNotification(content: content, identifier: "fallback-switch")
+        showNotification(content: content, identifier: "fallback-switch-\(UUID().uuidString)")
     }
     
     /// Show notification for manual profile switch
     /// - Parameter profileName: Name of the manually selected profile
     func notifyManualSwitch(profileName: String) {
+        guard isEnabled else { return }
         let content = UNMutableNotificationContent()
         content.title = "Switched to '\(profileName)'"
         content.body = "Manually selected"
         
-        showNotification(content: content, identifier: "manual-switch")
+        showNotification(content: content, identifier: "manual-switch-\(UUID().uuidString)")
     }
     
     /// Send the notification

@@ -108,33 +108,66 @@ class ProfileTriggerService {
         )
     }
     
-    /// Find the best matching profile based on currently connected devices
+    /// Find the best matching profile based on trigger rules and currently connected devices.
+    /// Supports both specificDevice and transportType rules.
+    /// Tie-breaking: when match counts are equal, profiles with more specific (non-class) matches win.
     /// - Parameters:
     ///   - profiles: Available profiles to check
     ///   - currentDeviceIDs: Set of currently connected device IDs
+    ///   - currentDevices: Full device list (needed for transport type matching)
     /// - Returns: Best matching profile with match details, or nil if no matches
-    private func findBestMatch(from profiles: [Profile], currentDeviceIDs: Set<String>) -> MatchResult? {
+    private func findBestMatch(from profiles: [Profile], currentDeviceIDs: Set<String>, currentDevices: [AudioDevice] = []) -> MatchResult? {
         var bestMatch: MatchResult? = nil
-        
+        var bestSpecificCount = 0
+
         for profile in profiles {
-            guard !profile.triggerDeviceIDs.isEmpty else { continue }
-            
-            let matchingDevices = profile.triggerDeviceIDs.filter { triggerID in
-                currentDeviceIDs.contains(triggerID)
+            guard !profile.triggerRules.isEmpty else { continue }
+
+            var matchCount = 0
+            var specificCount = 0
+            var primaryDevice: String? = nil
+
+            for rule in profile.triggerRules {
+                switch rule {
+                case .specificDevice(let id):
+                    if currentDeviceIDs.contains(id) {
+                        matchCount += 1
+                        specificCount += 1
+                        if primaryDevice == nil { primaryDevice = id }
+                    }
+                case .transportType(let type):
+                    if currentDevices.contains(where: { $0.transportType == type }) {
+                        matchCount += 1
+                        if primaryDevice == nil {
+                            primaryDevice = currentDevices.first(where: { $0.transportType == type })?.id ?? "Any \(type)"
+                        }
+                    }
+                }
             }
-            
-            if !matchingDevices.isEmpty {
-                // Prefer profile with more matching devices, or if tied, prefer the first one found
-                if bestMatch == nil || matchingDevices.count > bestMatch!.matchCount {
+
+            if matchCount > 0 {
+                let isBetter: Bool
+                if bestMatch == nil {
+                    isBetter = true
+                } else if matchCount > bestMatch!.matchCount {
+                    isBetter = true
+                } else if matchCount == bestMatch!.matchCount && specificCount > bestSpecificCount {
+                    isBetter = true  // Tie-break: prefer more specific matches
+                } else {
+                    isBetter = false
+                }
+
+                if isBetter {
                     bestMatch = MatchResult(
                         profile: profile,
-                        matchCount: matchingDevices.count,
-                        primaryTriggerDevice: matchingDevices.first!
+                        matchCount: matchCount,
+                        primaryTriggerDevice: primaryDevice!
                     )
+                    bestSpecificCount = specificCount
                 }
             }
         }
-        
+
         return bestMatch
     }
     
@@ -174,10 +207,14 @@ class ProfileTriggerService {
         currentActiveProfile: Profile?,
         isManualTrigger: Bool
     ) {
-        // For manual triggers (like profile saves), always re-apply even if same profile
-        // because profile settings (like preferred mode) may have changed
         if currentActiveProfile?.id == match.profile.id && !isManualTrigger {
-            // Profile already active, no change needed
+            // Same profile stays active, but the connected device set changed.
+            // Re-run evaluateAndApply so the priority list is re-walked with the
+            // new device list — a higher-priority device may have appeared or
+            // the current one may have disappeared.  The fingerprint will dedup
+            // if the resolved state is actually unchanged.
+            AppLogger.info("Same profile '\(match.profile.name)' still active — re-evaluating device priorities")
+            ProfileManager.shared.evaluateAndApply()
         } else {
             if currentActiveProfile?.id == match.profile.id {
                 AppLogger.info("Re-applying profile '\(match.profile.name)' (manual trigger - settings may have changed)")
@@ -193,7 +230,8 @@ class ProfileTriggerService {
                     )
                 }
             }
-            ProfileManager.shared.activateProfileFromTrigger(id: match.profile.id)
+            let triggerName = deviceHistoryService.getDevice(by: match.primaryTriggerDevice)?.name ?? match.primaryTriggerDevice
+            ProfileManager.shared.activateProfileFromTrigger(id: match.profile.id, triggerDeviceName: triggerName)
         }
     }
     
@@ -203,7 +241,7 @@ class ProfileTriggerService {
     ) {
         // Always fall back to System Default profile when no triggers match
         // This provides predictable, clear behavior
-        if let systemDefaultProfile = profiles.first(where: { $0.name == "System Default" }) {
+        if let systemDefaultProfile = profiles.first(where: { $0.isSystemDefault }) {
             if currentActiveProfile?.id != systemDefaultProfile.id {
                 AppLogger.info("No triggers matched - falling back to System Default profile")
                 
@@ -255,15 +293,22 @@ class ProfileTriggerService {
         let profiles = ProfileManager.shared.profiles
         let currentActiveProfile = ProfileManager.shared.activeProfile
         
-        // 2. Find the best matching profile based on trigger devices
+        // 2. Find the best matching profile based on trigger rules
         let matchResult = findBestMatch(
             from: profiles,
-            currentDeviceIDs: analysisResult.currentDeviceIDs
+            currentDeviceIDs: analysisResult.currentDeviceIDs,
+            currentDevices: devices
         )
         
         // 2.5. Check if this specific trigger should be applied based on timestamps (for automatic triggers)
         if !isManualTrigger, let match = matchResult {
-            if !ProfileManager.shared.shouldApplyTrigger(forDeviceIDs: match.profile.triggerDeviceIDs) {
+            // Include both legacy triggerDeviceIDs and the primary matched device
+            // (which may come from a class-based rule and not be in triggerDeviceIDs)
+            var deviceIDsToCheck = match.profile.triggerDeviceIDs
+            if !deviceIDsToCheck.contains(match.primaryTriggerDevice) {
+                deviceIDsToCheck.append(match.primaryTriggerDevice)
+            }
+            if !ProfileManager.shared.shouldApplyTrigger(forDeviceIDs: deviceIDsToCheck) {
                 return // Manual override is blocking this trigger
             }
         }

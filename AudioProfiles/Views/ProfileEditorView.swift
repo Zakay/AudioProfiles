@@ -205,31 +205,24 @@ struct GeneralSettingsSection: View {
                 HStack {
                     Text("Triggers:")
                         .frame(width: 80, alignment: .leading)
-                    TriggerDeviceSummaryView(selectedDeviceIDs: $profile.triggerDeviceIDs)
+                    TriggerDeviceSummaryView(triggerRules: $profile.triggerRules)
                 }
                 
-                // Preferred Mode Selection - Clean and Simple
-            HStack {
-                    Text("Mode:")
+                // Preferred Mode Selection - which mode activates by default
+                HStack {
+                    Text("Default:")
                         .frame(width: 80, alignment: .leading)
-                    
                     Picker("", selection: $profile.preferredMode) {
-                        Text("Public").tag(ProfileMode.public)
-                        Text("Private").tag(ProfileMode.private)
+                        Text(ProfileMode.public.displayName).tag(ProfileMode.public)
+                        Text(ProfileMode.private.displayName).tag(ProfileMode.private)
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()
-                    .frame(maxWidth: 150)
-                    
-                Spacer()
+                    .frame(maxWidth: 180)
+                    Spacer()
                 }
+                .help("Which mode activates when this profile is selected")
                 
-                // Hotkey Configuration
-                HStack {
-                    Text("Hotkey:")
-                        .frame(width: 80, alignment: .leading)
-                    HotkeyConfigView(hotkey: $profile.hotkey)
-                }
             }
             .padding()
             .background(Color(NSColor.controlBackgroundColor))

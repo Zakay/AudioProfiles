@@ -6,6 +6,7 @@ struct EQTabView: View {
 
     @ObservedObject private var eqStore        = EQStore.shared
     @ObservedObject private var installService = EQInstallationService.shared
+    @ObservedObject private var profileManager = ProfileManager.shared
     @State private var selectedDeviceID: String? = nil
     @State private var showingInstallSheet = false
     /// Cached device list — never query Core Audio synchronously on the main thread.
@@ -14,6 +15,11 @@ struct EQTabView: View {
 
     private var selectedDevice: AudioDevice? {
         outputDevices.first { $0.id == selectedDeviceID }
+    }
+
+    private var isBypassed: Bool {
+        guard let id = selectedDeviceID else { return false }
+        return EQStore.shared.isBypassed(for: id)
     }
 
     // MARK: - Body
@@ -68,11 +74,39 @@ struct EQTabView: View {
 
     private var toolbarRow: some View {
         VStack(alignment: .leading, spacing: 10) {
-            // Headline row
+            // Headline row with master toggle
             HStack {
-                Text("Equalizer")
-                    .font(.title2)
-                    .fontWeight(.semibold)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Equalizer")
+                        .font(.title2)
+                        .fontWeight(.semibold)
+                    Text("Per-device audio correction")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+
+                Toggle("", isOn: Binding(
+                    get: { !profileManager.isProcessingBypassed },
+                    set: { enabled in
+                        profileManager.setProcessingBypassed(!enabled)
+                    }
+                ))
+                    .toggleStyle(.switch)
+                    .labelsHidden()
+                    .help("Master EQ toggle — disables all audio processing when off")
+
+            }
+
+            // Device picker + bypass + reset on same row
+            HStack {
+                Picker("Device", selection: $selectedDeviceID) {
+                    ForEach(outputDevices) { device in
+                        Text(device.name).tag(Optional(device.id))
+                    }
+                }
+                .labelsHidden()
+
                 Spacer()
 
                 // EQ active indicator
@@ -104,14 +138,6 @@ struct EQTabView: View {
                 .controlSize(.small)
                 .disabled(selectedDeviceID == nil || eqStore.settings(for: selectedDeviceID ?? "").isFlat)
             }
-
-            // Device picker
-            Picker("Device", selection: $selectedDeviceID) {
-                ForEach(outputDevices) { device in
-                    Text(device.name).tag(Optional(device.id))
-                }
-            }
-            .labelsHidden()
         }
     }
 

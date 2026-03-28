@@ -51,7 +51,7 @@ struct AboutView: View {
                             .font(.headline)
                             .frame(maxWidth: .infinity, alignment: .leading)
                         
-                        Text("AudioProfiles automatically switches audio input and output devices based on hardware presence. Create profiles for different scenarios (home, office, studio) with device priorities and trigger conditions. Switch between Public and Private modes, use global hotkeys, and let the app intelligently manage your audio setup.")
+                        Text("AudioProfiles automatically switches audio input and output devices based on hardware presence. Create profiles for different scenarios (home, office, studio) with device priorities and trigger conditions. Switch between Public and Private modes and let the app intelligently manage your audio setup.")
                             .font(.body)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }

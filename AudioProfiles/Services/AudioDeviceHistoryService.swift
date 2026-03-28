@@ -14,7 +14,12 @@ class AudioDeviceHistoryService: ObservableObject {
     
     private init() {
         loadDeviceHistory()
-        pruneDeviceHistory()
+        // Defer pruning — collectProfileReferencedDeviceIDs() accesses
+        // ProfileManager.shared which may not be initialized yet (circular
+        // singleton dependency causes dispatch_once deadlock).
+        DispatchQueue.main.async { [weak self] in
+            self?.pruneDeviceHistory()
+        }
     }
     
     /// Update device history with current devices
@@ -47,6 +52,7 @@ class AudioDeviceHistoryService: ObservableObject {
                 return !isCurrentlyActive && !isInCurrentDevices && isWithinTimeframe
             }
             .map { $0.device }
+            .filter { !$0.id.hasPrefix("CADefaultDeviceAggregate") }  // Hide system aggregate devices
             .sorted { $0.name < $1.name }
         
         return previousDevices
@@ -82,14 +88,15 @@ class AudioDeviceHistoryService: ObservableObject {
             var updatedProfile = profile
             
             // Remove from all device lists
-            updatedProfile.triggerDeviceIDs.removeAll { $0 == deviceID }
+            updatedProfile.triggerRules.removeAll { $0 == .specificDevice(id: deviceID) }
+            updatedProfile.triggerDeviceIDs = TriggerRule.deriveDeviceIDs(from: updatedProfile.triggerRules)
             updatedProfile.publicOutputPriority.removeAll { $0 == deviceID }
             updatedProfile.publicInputPriority.removeAll { $0 == deviceID }
             updatedProfile.privateOutputPriority.removeAll { $0 == deviceID }
             updatedProfile.privateInputPriority.removeAll { $0 == deviceID }
-            
+
             // Update profile if changes were made
-            if updatedProfile.triggerDeviceIDs != originalProfile.triggerDeviceIDs ||
+            if updatedProfile.triggerRules != originalProfile.triggerRules ||
                updatedProfile.publicOutputPriority != originalProfile.publicOutputPriority ||
                updatedProfile.publicInputPriority != originalProfile.publicInputPriority ||
                updatedProfile.privateOutputPriority != originalProfile.privateOutputPriority ||
@@ -106,24 +113,40 @@ class AudioDeviceHistoryService: ObservableObject {
         }
     }
     
-    /// Clean up device history by removing devices older than 30 days
-    /// With proper device UIDs, this is the only cleanup needed
+    /// Clean up device history by removing devices older than 30 days,
+    /// but NEVER prune devices that are referenced by any profile's priority
+    /// or trigger lists — those must survive indefinitely regardless of lastSeen.
     func pruneDeviceHistory() {
         let cutoffDate = Date().addingTimeInterval(-deviceExpirationInterval)
+        let profileReferencedIDs = collectProfileReferencedDeviceIDs()
         var shouldSave = false
-        
-        // Remove devices older than 30 days
+
         for (deviceUID, entry) in deviceHistory {
-            if entry.lastSeen < cutoffDate {
+            if entry.lastSeen < cutoffDate && !profileReferencedIDs.contains(deviceUID) {
                 deviceHistory.removeValue(forKey: deviceUID)
                 shouldSave = true
             }
         }
-        
+
         if shouldSave {
             saveDeviceHistory()
-            AppLogger.info("🧹 Cleaned up expired devices from history")
+            AppLogger.info("🧹 Cleaned up expired devices from history (preserved profile-referenced devices)")
         }
+    }
+
+    /// Collect all device IDs referenced by any profile (triggers + all priority lists).
+    /// These devices must never be pruned from history.
+    private func collectProfileReferencedDeviceIDs() -> Set<String> {
+        let profiles = ProfileManager.shared.profiles
+        var ids = Set<String>()
+        for profile in profiles {
+            ids.formUnion(profile.triggerDeviceIDs)
+            ids.formUnion(profile.publicOutputPriority)
+            ids.formUnion(profile.publicInputPriority)
+            ids.formUnion(profile.privateOutputPriority)
+            ids.formUnion(profile.privateInputPriority)
+        }
+        return ids
     }
     
     // MARK: - Private Methods
@@ -228,9 +251,10 @@ class AudioDeviceHistoryService: ObservableObject {
             return
         }
         deviceHistory = history
-        
-        // Clean up expired devices on load
-        pruneDeviceHistory()
+
+        // Don't prune here — pruning accesses ProfileManager.shared which may
+        // not be initialized yet (circular singleton). Pruning is deferred to
+        // after init completes (see init()).
     }
     
     private func saveDeviceHistory() {

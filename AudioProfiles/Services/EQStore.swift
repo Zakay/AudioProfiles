@@ -10,9 +10,11 @@ final class EQStore: ObservableObject {
 
     @Published private(set) var settings: [String: EQSettings] = [:]
     @Published private(set) var modes: [String: EQMode] = [:]
+    @Published private(set) var bypass: [String: Bool] = [:]
 
     private let defaultsKey = "com.audioprofiles.eqsettings.v1"
     private let modesKey = "com.audioprofiles.eqmodes.v1"
+    private let bypassKey = "com.audioprofiles.eqbypass.v1"
 
     private init() { load() }
 
@@ -51,6 +53,25 @@ final class EQStore: ObservableObject {
         saveModes()
     }
 
+    // MARK: - Bypass
+
+    /// Whether EQ bypass is active for a device.
+    func isBypassed(for deviceUID: String) -> Bool {
+        bypass[deviceUID] ?? false
+    }
+
+    /// Set bypass state for a device.
+    func setBypassed(_ bypassed: Bool, for deviceUID: String) {
+        bypass[deviceUID] = bypassed
+        saveBypass()
+        ProfileManager.shared.evaluateAndApply()
+    }
+
+    /// Toggle bypass state for a device.
+    func toggleBypass(for deviceUID: String) {
+        setBypassed(!isBypassed(for: deviceUID), for: deviceUID)
+    }
+
     /// Returns the effective EQ for a device: base correction + content mode overlay.
     /// This is the single integration point for the two-layer EQ system.
     func effectiveSettings(for deviceUID: String) -> EQSettings {
@@ -78,6 +99,7 @@ final class EQStore: ObservableObject {
            let decoded = try? JSONDecoder().decode([String: EQMode].self, from: data) {
             modes = decoded
         }
+        loadBypass()
     }
 
     private func save() {
@@ -88,5 +110,17 @@ final class EQStore: ObservableObject {
     private func saveModes() {
         guard let data = try? JSONEncoder().encode(modes) else { return }
         UserDefaults.standard.set(data, forKey: modesKey)
+    }
+
+    private func loadBypass() {
+        if let data = UserDefaults.standard.data(forKey: bypassKey),
+           let decoded = try? JSONDecoder().decode([String: Bool].self, from: data) {
+            bypass = decoded
+        }
+    }
+
+    private func saveBypass() {
+        guard let data = try? JSONEncoder().encode(bypass) else { return }
+        UserDefaults.standard.set(data, forKey: bypassKey)
     }
 }

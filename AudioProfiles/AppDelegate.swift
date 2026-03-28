@@ -1,18 +1,24 @@
 import Cocoa
+import UserNotifications
 
 @MainActor
-class AppDelegate: NSObject, NSApplicationDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
   private let statusItemManager = StatusItemManager()
 
   func applicationDidFinishLaunching(_ notification: Notification) {
+    // Register as notification delegate so notifications appear while app is in foreground
+    UNUserNotificationCenter.current().delegate = self
+
+    // Register default preference values
+    UserDefaults.standard.register(defaults: [
+      "showAutoSwitchNotifications": true
+    ])
+
     // Set up the status item first
     statusItemManager.setupStatusItem()
 
     // Initialize device monitoring for real-time change detection
     _ = AudioDeviceMonitor.shared
-
-    // Initialize hotkeys
-    HotkeyCoordinator.shared.setupHotkeys()
 
     // Start auto-detection (after ProfileManager is fully initialized)
     ProfileManager.shared.startTriggerDetection()
@@ -50,6 +56,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
     // Keep the app running even when all windows are closed since it's a menu bar app
     return false
+  }
+
+  // MARK: - UNUserNotificationCenterDelegate
+
+  nonisolated func userNotificationCenter(
+    _ center: UNUserNotificationCenter,
+    willPresent notification: UNNotification,
+    withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+  ) {
+    // Show banner and play sound even when the app is in the foreground
+    completionHandler([.banner, .sound])
   }
 
   // MARK: - Private Methods

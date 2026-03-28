@@ -21,7 +21,13 @@ class ProfileValidationService {
             return history.getDevice(by: deviceID) != nil
         }
 
-        updatedProfile.triggerDeviceIDs = profile.triggerDeviceIDs.filter { isDeviceKnown($0) }
+        updatedProfile.triggerRules = profile.triggerRules.filter { rule in
+            switch rule {
+            case .specificDevice(let id): return isDeviceKnown(id)
+            case .transportType: return true  // class rules are always valid
+            }
+        }
+        updatedProfile.triggerDeviceIDs = TriggerRule.deriveDeviceIDs(from: updatedProfile.triggerRules)
         updatedProfile.publicOutputPriority = profile.publicOutputPriority.filter { isDeviceKnown($0) }
         updatedProfile.publicInputPriority = profile.publicInputPriority.filter { isDeviceKnown($0) }
         updatedProfile.privateOutputPriority = profile.privateOutputPriority.filter { isDeviceKnown($0) }
@@ -47,7 +53,7 @@ class ProfileValidationService {
         
         for (profile1, profile2) in zip(profiles1, profiles2) {
             if profile1.id != profile2.id ||
-               profile1.triggerDeviceIDs != profile2.triggerDeviceIDs ||
+               profile1.triggerRules != profile2.triggerRules ||
                profile1.publicOutputPriority != profile2.publicOutputPriority ||
                profile1.privateOutputPriority != profile2.privateOutputPriority ||
                profile1.publicInputPriority != profile2.publicInputPriority ||

@@ -47,6 +47,7 @@ class AudioDeviceFactory {
         
         let devices = deviceIDs.compactMap { createAudioDevice(from: $0) }
             .filter { $0.id != "AudioProfilesEQDevice-UID" }
+            .filter { !$0.id.hasPrefix("CADefaultDeviceAggregate") }  // Hide macOS system aggregate devices
         return sorted ? devices.sorted { $0.name < $1.name } : devices
     }
     

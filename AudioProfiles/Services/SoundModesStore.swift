@@ -100,16 +100,19 @@ final class SoundModesStore: ObservableObject {
         return overlay.isEnabled ? overlay.settings : .flat
     }
 
-    /// Get the currently active composite Layer 2 overlay (content + night if applicable)
+    /// Get the currently active composite Layer 2 overlay (content + night if applicable).
+    /// Night mode operates independently of the Content Modes master toggle.
     func activeOverlay() -> EQSettings {
-        guard isEnabled else { return .flat }
-
-        let contentOverlay = overlay(for: activeContentMode)
-
-        if isNightModeActive {
-            return EQSettings.combine(base: contentOverlay, overlay: nightMode.overlay)
+        let contentOverlay: EQSettings
+        if isEnabled {
+            contentOverlay = overlay(for: activeContentMode)
+        } else {
+            contentOverlay = .flat
         }
 
+        if nightMode.isEnabled && isNightModeActive {
+            return EQSettings.combine(base: contentOverlay, overlay: nightMode.overlay)
+        }
         return contentOverlay
     }
 

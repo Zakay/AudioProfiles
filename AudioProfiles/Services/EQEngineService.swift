@@ -478,6 +478,11 @@ final class EQEngineService: ObservableObject {
         // Cancel any pending async teardown
         cancelPendingTeardown()
 
+        // Clean up any active listener/timer from a previous state machine step
+        // (e.g., stuck in preparingSampleRate from a prior switch).
+        removeActiveListener()
+        invalidateSafetyTimer()
+
         AppLogger.info("EQEngineService: switching device → '\(virtualDeviceName)' real=\(realDeviceUID)")
 
         // 1. Increment generation — stale callbacks from old pipeline bail out immediately
@@ -668,16 +673,22 @@ final class EQEngineService: ObservableObject {
         pipelineState = .idle
 
         // Two-step pattern: create var first, then assign closure that captures it.
+        // Capture generation so a new start/switch that bumps gGeneration makes this stale.
+        let teardownGen = gGeneration.pointee
         var work: DispatchWorkItem!
         work = DispatchWorkItem { [self] in
             guard !work.isCancelled else { return }
+            guard teardownGen == gGeneration.pointee else { return }
             let devices = AudioDeviceFactory.getCurrentDevices()
             guard !work.isCancelled else { return }
+            guard teardownGen == gGeneration.pointee else { return }
             if let realDevice = devices.first(where: { $0.id == realDeviceUID && $0.isOutput }) {
                 guard !work.isCancelled else { return }
+                guard teardownGen == gGeneration.pointee else { return }
                 let ok = AudioDeviceControlService().setDefaultOutputDevice(realDevice)
                 AppLogger.info("EQEngineService: restored default output to '\(realDevice.name)' → \(ok)")
                 guard !work.isCancelled else { return }
+                guard teardownGen == gGeneration.pointee else { return }
                 if let vol = restoreVolume, let realID = translateUID(realDeviceUID) {
                     setDeviceVolume(realID, volume: vol)
                     AppLogger.info("EQEngineService: restored volume to \(String(format: "%.0f%%", vol * 100))")
@@ -698,15 +709,13 @@ final class EQEngineService: ObservableObject {
     // MARK: - Live EQ update
 
     func updateSettings(_ settings: EQSettings) {
-        guard let eq = eqAU else { return }
+        guard isRunning, gRenderStopped.pointee == 0, let eq = eqAU else {
+            if eqAU != nil {
+                AppLogger.warning("EQEngineService: updateSettings called but pipeline is not active (render stopped or not running)")
+            }
+            return
+        }
         configureEQBands(eq, settings: settings)
-
-        // Bypass the entire EQ unit when all settings are flat — avoids the
-        // slight gain that NBandEQ introduces even with all bands at 0 dB.
-        var bypass: UInt32 = settings.isFlat ? 1 : 0
-        AudioUnitSetProperty(eq, kAudioUnitProperty_BypassEffect,
-                             kAudioUnitScope_Global, 0,
-                             &bypass, UInt32(MemoryLayout<UInt32>.size))
     }
 
     // MARK: - Private: Listener / Timer management
@@ -859,13 +868,7 @@ final class EQEngineService: ObservableObject {
 
         configureEQBands(unit, settings: settings)
 
-        // Bypass entire EQ unit if settings are flat — avoids slight gain from processing
-        var bypass: UInt32 = settings.isFlat ? 1 : 0
-        AudioUnitSetProperty(unit, kAudioUnitProperty_BypassEffect,
-                             kAudioUnitScope_Global, 0,
-                             &bypass, UInt32(MemoryLayout<UInt32>.size))
-
-        AppLogger.error("[EQ-DIAG] EQ unit created with \(numBands) bands, bypass=\(bypass)")
+        AppLogger.error("[EQ-DIAG] EQ unit created with \(numBands) bands")
         return unit
     }
 

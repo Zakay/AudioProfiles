@@ -10,26 +10,33 @@ class ProfileDisplayFormatter {
         self.deviceHistoryService = deviceHistoryService
     }
 
-    /// Get summary of trigger devices for display
+    /// Get summary of trigger rules for display
     func triggerDevicesDisplay(for profile: Profile) -> String {
-        if profile.triggerDeviceIDs.isEmpty {
+        if profile.triggerRules.isEmpty {
             return "No Triggers"
         }
 
-        let validTriggerNames: [String] = profile.triggerDeviceIDs.compactMap { deviceId in
-            guard !deviceId.isEmpty,
-                  let device = deviceHistoryService.getDevice(by: deviceId) else { return nil }
-            return device.name
+        var parts: [String] = []
+
+        for rule in profile.triggerRules {
+            switch rule {
+            case .specificDevice(let id):
+                if !id.isEmpty, let device = deviceHistoryService.getDevice(by: id) {
+                    parts.append(device.name)
+                }
+            case .transportType(let type):
+                parts.append("Any \(type)")
+            }
         }
 
-        if validTriggerNames.isEmpty {
+        if parts.isEmpty {
             return "No Valid Triggers"
         }
 
-        if validTriggerNames.count == 1 {
-            return validTriggerNames[0]
+        if parts.count == 1 {
+            return parts[0]
         } else {
-            return "\(validTriggerNames.count) Triggers"
+            return "\(parts.count) Triggers"
         }
     }
 }

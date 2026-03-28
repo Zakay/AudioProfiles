@@ -7,23 +7,32 @@ struct DeviceRowView: View {
     let actions: [DeviceRowAction]
     let style: DeviceRowStyle
     let spacing: CGFloat
-    
+    let showDragHandle: Bool
+
     init(
         device: AudioDevice,
         isConnected: Bool,
         actions: [DeviceRowAction] = [],
         style: DeviceRowStyle = .plain(),
-        spacing: CGFloat = 12
+        spacing: CGFloat = 12,
+        showDragHandle: Bool = false
     ) {
         self.device = device
         self.isConnected = isConnected
         self.actions = actions
         self.style = style
         self.spacing = spacing
+        self.showDragHandle = showDragHandle
     }
     
     var body: some View {
         HStack(spacing: spacing) {
+            if showDragHandle {
+                Image(systemName: "line.3.horizontal")
+                    .foregroundColor(.secondary)
+                    .font(.caption)
+            }
+
             // Device content using consolidated utility
             DeviceDisplayUtils.deviceRowContent(for: device, isConnected: isConnected)
             
@@ -150,7 +159,8 @@ extension DeviceRowView {
             device: device,
             isConnected: isConnected,
             actions: [.remove(helpText: "Remove from priority list", handler: onRemove)],
-            style: .plain(verticalPadding: 2)
+            style: .plain(verticalPadding: 2),
+            showDragHandle: true
         )
     }
     

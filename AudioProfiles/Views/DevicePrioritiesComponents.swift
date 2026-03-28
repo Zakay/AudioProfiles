@@ -31,14 +31,13 @@ struct DevicePrioritiesHeader: View {
             
             Spacer()
             
-            // Clean segmented control
             Picker("Mode", selection: $selectedMode) {
-                Text("Public").tag(ProfileMode.public)
-                Text("Private").tag(ProfileMode.private)
+                Text(ProfileMode.public.displayName).tag(ProfileMode.public)
+                Text(ProfileMode.private.displayName).tag(ProfileMode.private)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(width: 120)
+            .frame(width: 150)
         }
     }
 }

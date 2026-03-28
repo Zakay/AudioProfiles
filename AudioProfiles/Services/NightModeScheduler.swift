@@ -38,8 +38,8 @@ final class NightModeScheduler: ObservableObject {
 
         let config = SoundModesStore.shared.nightMode
 
-        // Night mode must be explicitly enabled AND master Sound Modes must be on
-        guard config.isEnabled, SoundModesStore.shared.isEnabled else {
+        // Night mode must be explicitly enabled (independent of Content Modes master toggle)
+        guard config.isEnabled else {
             setActive(false)
             return
         }
