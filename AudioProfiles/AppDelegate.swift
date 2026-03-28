@@ -1,5 +1,6 @@
 import Cocoa
 
+@MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
   private let statusItemManager = StatusItemManager()
 

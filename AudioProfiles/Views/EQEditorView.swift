@@ -189,7 +189,13 @@ struct EQEditorView: View {
             if EQEngineService.shared.isRunning,
                EQEngineService.shared.targetDeviceUID == uid {
                 // Same device — hot update EQ bands
-                EQEngineService.shared.updateSettings(newSettings)
+                let effectiveEQ = EQStore.shared.effectiveSettings(for: uid)
+                if effectiveEQ.isFlat {
+                    // EQ became flat — let evaluateAndApply tear down virtual driver
+                    ProfileManager.shared.evaluateAndApply()
+                } else {
+                    EQEngineService.shared.updateSettings(effectiveEQ)
+                }
             } else if EQEngineService.shared.isRunning {
                 // Running on different device — switch to this one
                 EQEngineService.shared.switchDevice(
@@ -199,7 +205,7 @@ struct EQEditorView: View {
                 )
             } else if !newSettings.isFlat {
                 // Not running — start EQ for this device
-                EQEngineService.shared.start(
+                EQEngineService.shared.startPipeline(
                     realDeviceUID: uid,
                     settings: newSettings,
                     virtualDeviceName: "\(name) EQ"

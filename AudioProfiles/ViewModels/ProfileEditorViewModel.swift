@@ -1,5 +1,6 @@
 import Combine
 
+@MainActor
 class ProfileEditorViewModel: ObservableObject {
     @Published var profile: Profile
     

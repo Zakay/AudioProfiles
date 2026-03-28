@@ -1,6 +1,7 @@
 import Foundation
 
 /// Utility for formatting Profile data for display purposes
+@MainActor
 class ProfileDisplayFormatter {
 
     private let deviceHistoryService: AudioDeviceHistoryService

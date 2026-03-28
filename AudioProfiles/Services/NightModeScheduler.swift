@@ -4,6 +4,8 @@ import Combine
 /// Evaluates whether night mode should be active based on the current time
 /// and the user's quiet hours schedule. Uses precise timers that fire at
 /// exact transition times — no polling.
+///
+/// Called by SoundModesStore setter methods (setNightMode, setEnabled) via reschedule().
 @MainActor
 final class NightModeScheduler: ObservableObject {
 
@@ -12,37 +14,25 @@ final class NightModeScheduler: ObservableObject {
     @Published private(set) var isActive: Bool = false
 
     private var transitionTimer: Timer?
-    private var cancellables = Set<AnyCancellable>()
 
-    private init() {
-        // Re-evaluate when night mode config changes
-        // Use .receive(on:) to ensure the store's property is updated before we read it
-        SoundModesStore.shared.$nightMode
-            .dropFirst() // skip initial value (handled by isEnabled sink)
-            .receive(on: RunLoop.main)
-            .sink { [weak self] _ in
-                // By the time this fires on next run loop, the property is updated
-                self?.scheduleNextTransition()
-            }
-            .store(in: &cancellables)
+    private init() {}
 
-        // Re-evaluate when master toggle changes
-        SoundModesStore.shared.$isEnabled
-            .receive(on: RunLoop.main)
-            .sink { [weak self] enabled in
-                if enabled {
-                    self?.scheduleNextTransition()
-                } else {
-                    self?.cancelTimer()
-                    self?.setActive(false)
-                }
-            }
-            .store(in: &cancellables)
+    // MARK: - Public API
+
+    /// Evaluate current state and schedule a timer for the exact next transition.
+    /// Called by SoundModesStore.setNightMode() and SoundModesStore.setEnabled().
+    func reschedule() {
+        scheduleNextTransition()
+    }
+
+    /// Cancel timer and deactivate night mode immediately.
+    func cancelAndDeactivate() {
+        cancelTimer()
+        setActive(false)
     }
 
     // MARK: - Precise scheduling
 
-    /// Evaluate current state and schedule a timer for the exact next transition.
     private func scheduleNextTransition() {
         cancelTimer()
 
@@ -118,5 +108,6 @@ final class NightModeScheduler: ObservableObject {
         } else {
             AppLogger.info("Night mode deactivated")
         }
+        ProfileManager.shared.evaluateAndApply()
     }
 }

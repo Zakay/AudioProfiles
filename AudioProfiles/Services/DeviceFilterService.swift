@@ -6,6 +6,7 @@ import Foundation
 /// **Architecture Role**: Service (Querying & Filtering)
 /// **Usage**: Instantiated by other services; not a singleton
 /// **Key Dependencies**: AudioDeviceHistoryService, AudioDeviceFactory
+@MainActor
 class DeviceFilterService {
     
     // MARK: - Dependencies

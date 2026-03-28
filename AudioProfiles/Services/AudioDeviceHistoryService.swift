@@ -2,6 +2,7 @@ import Foundation
 import Combine
 
 /// Manages device history tracking, persistence, and cleanup
+@MainActor
 class AudioDeviceHistoryService: ObservableObject {
     
     static let shared = AudioDeviceHistoryService()

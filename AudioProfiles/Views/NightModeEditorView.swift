@@ -104,7 +104,9 @@ struct NightModeEditorView: View {
     }
 
     private func saveSettings() {
-        store.nightMode.overlay = settings
+        var config = store.nightMode
+        config.overlay = settings
+        store.setNightMode(config)
     }
 
     private func bandColor(for index: Int) -> Color {

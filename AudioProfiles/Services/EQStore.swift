@@ -24,7 +24,7 @@ final class EQStore: ObservableObject {
     }
 
     /// Returns non-flat EQ settings for a device, or `nil` when flat / absent.
-    /// Used by ProfileActivationService to decide whether to engage the pipeline.
+    /// Used by AudioPipelineService to decide whether to engage the pipeline.
     func activeEQ(for deviceUID: String) -> EQSettings? {
         let eq = settings[deviceUID] ?? .flat
         return eq.isFlat ? nil : eq

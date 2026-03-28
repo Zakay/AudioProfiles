@@ -2,6 +2,7 @@ import Foundation
 import Combine
 import SwiftUI
 
+@MainActor
 class StatusBarViewModel: ObservableObject {
     @Published var icon: String = "speaker.wave.2.fill"
     @Published var title: String = "AudioProfiles"

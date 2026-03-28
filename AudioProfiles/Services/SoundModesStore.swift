@@ -4,6 +4,10 @@ import Combine
 /// Persistence and state for Sound Modes feature.
 /// Stores content mode overlays, night mode config, and tracks the active mode.
 /// Master toggle controls whether the feature is active at all.
+///
+/// External callers use setter methods (setEnabled, setOverlays, setNightMode, setManualOverride)
+/// which handle persistence + side effects (evaluateAndApply, detection services).
+/// Internal callers (load, setActiveMode, setNightModeActive) write directly to backing storage.
 @MainActor
 final class SoundModesStore: ObservableObject {
 
@@ -12,24 +16,16 @@ final class SoundModesStore: ObservableObject {
     // MARK: - Published State
 
     /// Master toggle — when false, the entire feature is dormant
-    @Published var isEnabled: Bool = false {
-        didSet { saveBool(isEnabled, forKey: enabledKey) }
-    }
+    @Published private(set) var isEnabled: Bool = false
 
     /// Per-mode overlay settings (device-independent)
-    @Published var overlays: [ContentModeType: ContentModeOverlay] = [:] {
-        didSet { saveOverlays() }
-    }
+    @Published private(set) var overlays: [ContentModeType: ContentModeOverlay] = [:]
 
     /// Night mode schedule and overlay
-    @Published var nightMode: NightModeConfig = .default {
-        didSet { saveNightMode() }
-    }
+    @Published private(set) var nightMode: NightModeConfig = .default
 
     /// User-pinned mode override (nil = auto-detection)
-    @Published var manualOverride: ContentModeType? = nil {
-        didSet { saveOverride() }
-    }
+    @Published private(set) var manualOverride: ContentModeType? = nil
 
     /// Currently active content mode (set by detection service or manual override)
     @Published private(set) var activeContentMode: ContentModeType = .none
@@ -51,7 +47,41 @@ final class SoundModesStore: ObservableObject {
 
     private init() { load() }
 
-    // MARK: - Public API
+    // MARK: - Public Setter Methods (with side effects)
+
+    func setEnabled(_ value: Bool) {
+        guard value != isEnabled else { return }
+        isEnabled = value
+        saveBool(isEnabled, forKey: enabledKey)
+        if isEnabled {
+            ContentModeDetectionService.shared.startDetection()
+        } else {
+            ContentModeDetectionService.shared.stopDetection()
+        }
+        NightModeScheduler.shared.reschedule()
+        ProfileManager.shared.evaluateAndApply()
+    }
+
+    func setOverlays(_ value: [ContentModeType: ContentModeOverlay]) {
+        overlays = value
+        saveOverlays()
+        ProfileManager.shared.evaluateAndApply()
+    }
+
+    func setNightMode(_ value: NightModeConfig) {
+        nightMode = value
+        saveNightMode()
+        NightModeScheduler.shared.reschedule()
+        ProfileManager.shared.evaluateAndApply()
+    }
+
+    func setManualOverride(_ value: ContentModeType?) {
+        manualOverride = value
+        saveOverride()
+        ContentModeDetectionService.shared.detect()
+    }
+
+    // MARK: - Internal API (no evaluateAndApply — callers handle it)
 
     /// Called by detection service to update the active mode
     func setActiveMode(_ mode: ContentModeType, sourceApp: String?) {
@@ -86,6 +116,7 @@ final class SoundModesStore: ObservableObject {
     // MARK: - Persistence
 
     private func load() {
+        // Direct assignment — no side effects during init
         isEnabled = UserDefaults.standard.bool(forKey: enabledKey)
 
         if let data = UserDefaults.standard.data(forKey: overlaysKey),

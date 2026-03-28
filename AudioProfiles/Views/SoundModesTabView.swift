@@ -17,7 +17,10 @@ struct SoundModesTabView: View {
                         .foregroundColor(.secondary)
                 }
                 Spacer()
-                Toggle("", isOn: $store.isEnabled)
+                Toggle("", isOn: Binding(
+                    get: { store.isEnabled },
+                    set: { store.setEnabled($0) }
+                ))
                     .toggleStyle(.switch)
                     .labelsHidden()
             }
@@ -95,10 +98,10 @@ struct SoundModesTabView: View {
 
             Spacer()
 
-            // Mode picker — use separate state to avoid Combine lag
+            // Mode picker
             Menu {
                 Button {
-                    store.manualOverride = nil
+                    store.setManualOverride(nil)
                 } label: {
                     HStack {
                         Text("Auto")
@@ -112,16 +115,12 @@ struct SoundModesTabView: View {
 
                 ForEach(ContentModeType.allCases.filter { $0 != .none }, id: \.self) { mode in
                     Button(mode.displayName) {
-                        store.manualOverride = mode
+                        store.setManualOverride(mode)
                     }
                 }
             } label: {
-                HStack(spacing: 4) {
-                    Text(store.manualOverride?.displayName ?? "Auto")
-                        .font(.callout)
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.caption2)
-                }
+                Text(store.manualOverride?.displayName ?? "Auto")
+                    .font(.callout)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
                 .background(Color(NSColor.controlBackgroundColor))
@@ -129,9 +128,6 @@ struct SoundModesTabView: View {
                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3)))
             }
         }
-        .padding(10)
-        .background(Color(NSColor.controlBackgroundColor))
-        .cornerRadius(8)
     }
 
     // MARK: - Modes List
@@ -148,8 +144,20 @@ struct SoundModesTabView: View {
                         .frame(width: 20)
 
                     VStack(alignment: .leading, spacing: 1) {
-                        Text(mode.displayName)
-                            .font(.callout)
+                        HStack(spacing: 4) {
+                            Text(mode.displayName)
+                                .font(.callout)
+                            if mode == .voice {
+                                Text("Auto · Mic")
+                                    .font(.caption2)
+                                    .fontWeight(.medium)
+                                    .padding(.horizontal, 5)
+                                    .padding(.vertical, 1)
+                                    .background(Color.green.opacity(0.15))
+                                    .foregroundColor(.green)
+                                    .cornerRadius(3)
+                            }
+                        }
                         Text(mode.description)
                             .font(.caption)
                             .foregroundColor(.secondary)
@@ -185,21 +193,44 @@ struct SoundModesTabView: View {
                         .foregroundColor(.secondary)
                 }
                 Spacer()
-                Toggle("", isOn: $store.nightMode.isEnabled)
+                Toggle("", isOn: Binding(
+                    get: { store.nightMode.isEnabled },
+                    set: { newValue in
+                        var config = store.nightMode
+                        config.isEnabled = newValue
+                        store.setNightMode(config)
+                    }
+                ))
                     .toggleStyle(.switch)
                     .labelsHidden()
             }
 
             if store.nightMode.isEnabled {
                 HStack(spacing: 12) {
-                    DatePicker("From", selection: nightTimeBinding(hour: $store.nightMode.startHour, minute: $store.nightMode.startMinute), displayedComponents: .hourAndMinute)
+                    DatePicker("From", selection: nightTimeBinding(
+                        getValue: { (store.nightMode.startHour, store.nightMode.startMinute) },
+                        setValue: { hour, minute in
+                            var config = store.nightMode
+                            config.startHour = hour
+                            config.startMinute = minute
+                            store.setNightMode(config)
+                        }
+                    ), displayedComponents: .hourAndMinute)
                         .font(.caption)
                         .labelsHidden()
 
-                    Text("–")
+                    Text("\u{2013}")
                         .foregroundColor(.secondary)
 
-                    DatePicker("To", selection: nightTimeBinding(hour: $store.nightMode.endHour, minute: $store.nightMode.endMinute), displayedComponents: .hourAndMinute)
+                    DatePicker("To", selection: nightTimeBinding(
+                        getValue: { (store.nightMode.endHour, store.nightMode.endMinute) },
+                        setValue: { hour, minute in
+                            var config = store.nightMode
+                            config.endHour = hour
+                            config.endMinute = minute
+                            store.setNightMode(config)
+                        }
+                    ), displayedComponents: .hourAndMinute)
                         .font(.caption)
                         .labelsHidden()
 
@@ -213,27 +244,27 @@ struct SoundModesTabView: View {
                 }
             }
         }
-        .padding(10)
-        .background(Color(NSColor.controlBackgroundColor))
-        .cornerRadius(8)
         .sheet(isPresented: $editingNightMode) {
             NightModeEditorView()
         }
     }
 
-    /// Bridge between hour/minute Int bindings and DatePicker's Date binding
-    private func nightTimeBinding(hour: Binding<Int>, minute: Binding<Int>) -> Binding<Date> {
+    /// Bridge between hour/minute getter/setter and DatePicker's Date binding
+    private func nightTimeBinding(
+        getValue: @escaping () -> (Int, Int),
+        setValue: @escaping (Int, Int) -> Void
+    ) -> Binding<Date> {
         Binding<Date>(
             get: {
+                let (hour, minute) = getValue()
                 var comps = DateComponents()
-                comps.hour = hour.wrappedValue
-                comps.minute = minute.wrappedValue
+                comps.hour = hour
+                comps.minute = minute
                 return Calendar.current.date(from: comps) ?? Date()
             },
             set: { date in
                 let comps = Calendar.current.dateComponents([.hour, .minute], from: date)
-                hour.wrappedValue = comps.hour ?? 22
-                minute.wrappedValue = comps.minute ?? 0
+                setValue(comps.hour ?? 22, comps.minute ?? 0)
             }
         )
     }

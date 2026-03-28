@@ -1,6 +1,7 @@
 import Foundation
 
 /// Coordinates hotkey registration and management between ProfileManager and HotkeyManager
+@MainActor
 class HotkeyCoordinator {
     /// Shared singleton instance
     static let shared = HotkeyCoordinator()

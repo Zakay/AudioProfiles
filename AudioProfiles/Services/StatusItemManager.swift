@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import Combine
 
+@MainActor
 final class StatusItemManager: NSObject, ObservableObject, NSPopoverDelegate {
     private var statusItem: NSStatusItem?
     private var hostingView: NSHostingView<StatusItemView>?
@@ -49,6 +50,17 @@ final class StatusItemManager: NSObject, ObservableObject, NSPopoverDelegate {
             .sink { [weak self] mode, profile, isDisabled in
                 Task { @MainActor in
                     self?.updateStatusIcon(mode: mode, icon: profile?.iconName, isDisabled: isDisabled)
+                }
+            }
+            .store(in: &cancellables)
+
+        // Update when content mode changes (UI-only observation)
+        SoundModesStore.shared.$activeContentMode
+            .combineLatest(SoundModesStore.shared.$isEnabled)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _, _ in
+                Task { @MainActor in
+                    self?.updateStatusIcon()
                 }
             }
             .store(in: &cancellables)

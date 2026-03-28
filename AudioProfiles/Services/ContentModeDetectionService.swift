@@ -6,12 +6,14 @@ import AppKit
 /// Detects the current content mode based on system signals — no app-specific logic.
 ///
 /// Detection priority:
-/// 1. Mic active on any non-self process → Voice
-/// 2. Now Playing metadata: media type + duration heuristics → Music/Movie/Podcast
-/// 3. Nothing detected → None
+/// 1. Manual override (user pinned a mode)
+/// 2. Mic active on any non-self process → Voice
+/// 3. Now Playing metadata: media type + duration heuristics → Music/Movie/Podcast
+/// 4. Nothing detected → .none (no overlay)
 ///
 /// All detection is event-driven (zero polling):
 /// - Mic: kAudioDevicePropertyDeviceIsRunningSomewhere listener
+/// - Default input change: kAudioHardwarePropertyDefaultInputDevice listener
 /// - Now Playing: MediaRemote framework notifications
 @MainActor
 final class ContentModeDetectionService: ObservableObject {
@@ -21,9 +23,12 @@ final class ContentModeDetectionService: ObservableObject {
     @Published private(set) var detectedMode: ContentModeType = .none
     @Published private(set) var sourceApp: String?
 
-    private var cancellables = Set<AnyCancellable>()
-    private var micListenerInstalled = false
+    // MARK: - Mic listener state
+    private var micListenerBlock: AudioObjectPropertyListenerBlock?
     private var micListenerDeviceID: AudioObjectID = 0
+
+    // MARK: - Default input device listener state
+    private var defaultInputListenerBlock: AudioObjectPropertyListenerBlock?
 
     // MARK: - Now Playing state
     private var nowPlayingInfo: [String: Any] = [:]
@@ -31,53 +36,28 @@ final class ContentModeDetectionService: ObservableObject {
 
     private init() {
         AppLogger.info("ContentModeDetectionService: init called, isEnabled=\(SoundModesStore.shared.isEnabled)")
-        setupBindings()
-    }
-
-    // MARK: - Setup
-
-    private func setupBindings() {
-        // Start/stop detection when master toggle changes
-        SoundModesStore.shared.$isEnabled
-            .removeDuplicates()
-            .sink { [weak self] enabled in
-                if enabled {
-                    self?.startDetection()
-                } else {
-                    self?.stopDetection()
-                }
-            }
-            .store(in: &cancellables)
-
-        // Re-detect when manual override changes.
-        // receive(on:) ensures the property is updated before detect() reads it.
-        SoundModesStore.shared.$manualOverride
-            .dropFirst()
-            .receive(on: RunLoop.main)
-            .sink { [weak self] _ in
-                self?.detect()
-            }
-            .store(in: &cancellables)
     }
 
     // MARK: - Detection Control
 
-    private func startDetection() {
+    func startDetection() {
         stopDetection()
         registerNowPlayingNotifications()
+        registerDefaultInputListener()
         registerMicListener()
         detect()
     }
 
-    private func stopDetection() {
+    func stopDetection() {
         unregisterMicListener()
+        unregisterDefaultInputListener()
         unregisterNowPlayingNotifications()
         applyMode(.none, source: nil)
     }
 
     // MARK: - Core Detection Logic
 
-    private func detect() {
+    func detect() {
         guard SoundModesStore.shared.isEnabled else {
             AppLogger.info("ContentModeDetection: skipping — not enabled")
             return
@@ -101,7 +81,7 @@ final class ContentModeDetectionService: ObservableObject {
             return
         }
 
-        // Priority 3: Nothing detected
+        // Priority 3: Nothing detected → .none
         applyMode(.none, source: nil)
     }
 
@@ -113,6 +93,7 @@ final class ContentModeDetectionService: ObservableObject {
         if mode != .none {
             AppLogger.info("Content mode: \(mode.displayName) (source: \(source ?? "none"))")
         }
+        ProfileManager.shared.evaluateAndApply()
     }
 
     // MARK: - Mic Detection (event-driven via Core Audio listener)
@@ -170,7 +151,7 @@ final class ContentModeDetectionService: ObservableObject {
     /// Listen to the default input device's "is running" property.
     /// Fires whenever ANY process starts or stops using the mic.
     private func registerMicListener() {
-        guard !micListenerInstalled else { return }
+        guard micListenerBlock == nil else { return }
 
         var defaultInputAddr = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDefaultInputDevice,
@@ -192,28 +173,80 @@ final class ContentModeDetectionService: ObservableObject {
             mElement: kAudioObjectPropertyElementMain
         )
 
-        let status = AudioObjectAddPropertyListenerBlock(inputDeviceID, &addr, DispatchQueue.main) { [weak self] _, _ in
+        // Store the block so we can use the SAME reference for removal
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             Task { @MainActor [weak self] in
                 self?.detect()
             }
         }
+        micListenerBlock = block
+
+        let status = AudioObjectAddPropertyListenerBlock(inputDeviceID, &addr, DispatchQueue.main, block)
 
         if status == noErr {
-            micListenerInstalled = true
             micListenerDeviceID = inputDeviceID
+        } else {
+            micListenerBlock = nil
         }
     }
 
     private func unregisterMicListener() {
-        guard micListenerInstalled, micListenerDeviceID != 0 else { return }
+        guard let block = micListenerBlock, micListenerDeviceID != 0 else { return }
         var addr = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
-        AudioObjectRemovePropertyListenerBlock(micListenerDeviceID, &addr, DispatchQueue.main) { _, _ in }
-        micListenerInstalled = false
+        AudioObjectRemovePropertyListenerBlock(micListenerDeviceID, &addr, DispatchQueue.main, block)
+        micListenerBlock = nil
         micListenerDeviceID = 0
+    }
+
+    // MARK: - Default Input Device Change Listener
+
+    /// Re-register mic listener when the default input device changes.
+    private func registerDefaultInputListener() {
+        guard defaultInputListenerBlock == nil else { return }
+
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                // Re-register mic listener on the new default input device
+                self.unregisterMicListener()
+                self.registerMicListener()
+                self.detect()
+            }
+        }
+        defaultInputListenerBlock = block
+
+        AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject),
+            &addr,
+            DispatchQueue.main,
+            block
+        )
+    }
+
+    private func unregisterDefaultInputListener() {
+        guard let block = defaultInputListenerBlock else { return }
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        AudioObjectRemovePropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject),
+            &addr,
+            DispatchQueue.main,
+            block
+        )
+        defaultInputListenerBlock = nil
     }
 
     // MARK: - Now Playing Detection (MediaRemote — metadata only, no app-specific rules)
@@ -236,9 +269,7 @@ final class ContentModeDetectionService: ObservableObject {
         }
         let register = unsafeBitCast(registerPtr, to: RegisterFn.self)
         register(DispatchQueue.main)
-        NSLog("[AudioProfiles] ContentModeDetection: registered for Now Playing notifications")
-        // Debug: write to file to confirm this code runs
-        try? "MediaRemote registered at \(Date())\n".write(toFile: "/tmp/audioprofiles-debug.log", atomically: true, encoding: .utf8)
+        AppLogger.info("ContentModeDetection: registered for Now Playing notifications")
 
         // Listen for ALL MediaRemote notification variants
         let notificationNames = [
@@ -279,12 +310,6 @@ final class ContentModeDetectionService: ObservableObject {
     }
 
     @objc private func nowPlayingChanged() {
-        let msg = "[\(Date())] nowPlayingChanged notification fired\n"
-        if let fh = FileHandle(forWritingAtPath: "/tmp/audioprofiles-debug.log") {
-            fh.seekToEndOfFile()
-            fh.write(msg.data(using: .utf8)!)
-            fh.closeFile()
-        }
         fetchNowPlayingInfo()
     }
 
@@ -297,7 +322,6 @@ final class ContentModeDetectionService: ObservableObject {
             let getInfo = unsafeBitCast(ptr, to: GetInfoFn.self)
             getInfo(DispatchQueue.main) { [weak self] info in
                 Task { @MainActor [weak self] in
-                    self?.debugLog("GetNowPlayingInfo: keys=\(info.keys.sorted()) count=\(info.count)")
                     if !info.isEmpty {
                         self?.handleNowPlayingInfo(info)
                         return
@@ -309,51 +333,22 @@ final class ContentModeDetectionService: ObservableObject {
         // Try 2: MRMediaRemoteGetNowPlayingApplicationIsPlaying (returns bool)
         typealias IsPlayingFn = @convention(c) (DispatchQueue, @escaping (Bool) -> Void) -> Void
         if let ptr = CFBundleGetFunctionPointerForName(bundle, "MRMediaRemoteGetNowPlayingApplicationIsPlaying" as CFString) {
-            let isPlaying = unsafeBitCast(ptr, to: IsPlayingFn.self)
-            isPlaying(DispatchQueue.main) { [weak self] playing in
-                Task { @MainActor [weak self] in
-                    self?.debugLog("IsPlaying: \(playing)")
-                }
-            }
+            let _ = unsafeBitCast(ptr, to: IsPlayingFn.self)
+            // We don't use this result directly — it's available for future use
         }
 
         // Try 3: MRMediaRemoteGetNowPlayingApplicationPID (returns pid_t)
         typealias GetPIDFn = @convention(c) (DispatchQueue, @escaping (Int32) -> Void) -> Void
         if let ptr = CFBundleGetFunctionPointerForName(bundle, "MRMediaRemoteGetNowPlayingApplicationPID" as CFString) {
-            let getPID = unsafeBitCast(ptr, to: GetPIDFn.self)
-            getPID(DispatchQueue.main) { [weak self] pid in
-                Task { @MainActor [weak self] in
-                    if pid > 0 {
-                        let app = NSWorkspace.shared.runningApplications.first { $0.processIdentifier == pid }
-                        let name = app?.localizedName ?? "pid:\(pid)"
-                        let bundleID = app?.bundleIdentifier ?? "?"
-                        self?.debugLog("GetPID: pid=\(pid) app=\(name) bundle=\(bundleID)")
-                    } else {
-                        self?.debugLog("GetPID: no active player (pid=\(pid))")
-                    }
-                }
-            }
+            let _ = unsafeBitCast(ptr, to: GetPIDFn.self)
+            // We don't use this result directly — it's available for future use
         }
     }
 
     private func handleNowPlayingInfo(_ info: [String: Any]) {
-        let appName = info["kMRMediaRemoteNowPlayingInfoApplicationDisplayName"] as? String ?? "?"
-        let title = info["kMRMediaRemoteNowPlayingInfoTitle"] as? String ?? "?"
-        let mediaType = info["kMRMediaRemoteNowPlayingInfoMediaType"] as? Int ?? -1
-        let rate = info["kMRMediaRemoteNowPlayingInfoPlaybackRate"] as? Double ?? -1
-        debugLog("NowPlaying: app=\(appName) title=\(title) type=\(mediaType) rate=\(rate)")
         nowPlayingInfo = info
         nowPlayingAppName = info["kMRMediaRemoteNowPlayingInfoApplicationDisplayName"] as? String
         detect()
-    }
-
-    private func debugLog(_ msg: String) {
-        let line = "[\(Date())] \(msg)\n"
-        if let fh = FileHandle(forWritingAtPath: "/tmp/audioprofiles-debug.log") {
-            fh.seekToEndOfFile()
-            fh.write(line.data(using: .utf8)!)
-            fh.closeFile()
-        }
     }
 
     /// Classify content mode from Now Playing metadata — no app-specific bundle ID rules.
@@ -372,7 +367,7 @@ final class ContentModeDetectionService: ObservableObject {
             switch mediaType {
             case 1:  return (.music, appName)
             case 2:  return (.movie, appName)
-            case 3:  return (.podcast, appName)
+            case 3:  return (.voice, appName)  // Podcast → Voice (speech clarity)
             default: break
             }
         }
@@ -389,7 +384,7 @@ final class ContentModeDetectionService: ObservableObject {
                 let hasArtist = nowPlayingInfo["kMRMediaRemoteNowPlayingInfoArtist"] as? String != nil
                 let hasAlbum = nowPlayingInfo["kMRMediaRemoteNowPlayingInfoAlbum"] as? String != nil
                 if hasArtist && !hasAlbum {
-                    return (.podcast, appName)
+                    return (.voice, appName)  // Podcast-like → Voice (speech clarity)
                 }
                 return (.movie, appName)
             }
@@ -406,7 +401,7 @@ final class ContentModeDetectionService: ObservableObject {
             return (.music, appName)
         }
 
-        // Something is playing but we can't classify it
-        return (.music, appName)
+        // Something is playing but we can't classify it — return nil (defaults to .none)
+        return nil
     }
 }

@@ -117,7 +117,9 @@ struct SoundModeEditorView: View {
     private func saveSettings() {
         var overlay = store.overlays[mode] ?? ContentModeOverlay.defaultOverlay(for: mode)
         overlay.settings = settings
-        store.overlays[mode] = overlay
+        var updatedOverlays = store.overlays
+        updatedOverlays[mode] = overlay
+        store.setOverlays(updatedOverlays)
     }
 
     private func bandColor(for index: Int) -> Color {

@@ -21,15 +21,45 @@ import Combine
 ///   EQ render callback → NBandEQ → Output AUHAL render callback → Real hardware
 ///
 /// Threading: start/stop called on main thread; IO callbacks on real-time audio threads.
+///
+/// State machine: Uses Core Audio property listeners (not Thread.sleep or semaphores)
+/// to wait for device appearance and sample rate changes.
 @MainActor
 final class EQEngineService: ObservableObject {
 
     static let shared = EQEngineService()
 
+    // MARK: - Pipeline State Machine
+
+    enum PipelineState {
+        case idle
+        case preparingDevice       // Waiting for virtual device to appear in HAL device list
+        case preparingSampleRate   // Waiting for virtual device sample rate to match real device
+        case starting              // Creating AUs, wiring render chain, starting IO
+        case running               // Pipeline active, audio flowing
+        case stopping              // Teardown in progress
+    }
+
+    struct PipelineRequest {
+        let realDeviceUID: String
+        let settings: EQSettings
+        let virtualDeviceName: String
+        let generation: Int32
+    }
+
     // MARK: - Published state
 
     @Published private(set) var isRunning: Bool = false
     @Published private(set) var targetDeviceUID: String?
+
+    // MARK: - State machine properties
+
+    private(set) var pipelineState: PipelineState = .idle
+    private var currentRequest: PipelineRequest?
+    private var activeListenerBlock: AudioObjectPropertyListenerBlock?
+    private var activeSafetyTimer: Timer?
+    private var activeListenerObjectID: AudioObjectID = 0
+    private var activeListenerAddress: AudioObjectPropertyAddress?
 
     // MARK: - Private audio state
 
@@ -88,85 +118,30 @@ final class EQEngineService: ObservableObject {
                 // an IO thread may still be mid-callback with a pointer to it.
                 self.targetDeviceUID = nil
                 self.isRunning = false
+                self.pipelineState = .idle
                 EQDriverService.shared.hide()
-            }
-            .store(in: &cancellables)
-
-        // Live hot-update when content mode or night mode changes.
-        // No dropFirst — we need to react to the initial value if detection
-        // already ran before this subscription was created (e.g., mic was active on launch).
-        SoundModesStore.shared.$activeContentMode
-            .combineLatest(SoundModesStore.shared.$isNightModeActive)
-            .removeDuplicates { $0.0 == $1.0 && $0.1 == $1.1 }
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] contentMode, nightActive in
-                guard let self = self else { return }
-                let msg = "EQEngine: content mode changed to \(contentMode.rawValue) (night=\(nightActive)), isRunning=\(self.isRunning)"
-                AppLogger.info(msg)
-                if self.isRunning, let deviceUID = self.targetDeviceUID {
-                    // Check if EQ is still needed — if not, let profile re-apply to tear down
-                    if !EQStore.shared.needsEQ(for: deviceUID) {
-                        AppLogger.info("EQEngineService: EQ no longer needed, re-applying profile")
-                        ProfileManager.shared.reapplyActiveProfile()
-                    } else {
-                        // Hot-update running pipeline
-                        let effective = EQStore.shared.effectiveSettings(for: deviceUID)
-                        self.updateSettings(effective)
-                        AppLogger.info("EQEngineService: live-updated EQ for content mode change")
-                    }
-                } else if !self.isRunning {
-                    // Engine not running — re-apply active profile to evaluate if virtual driver needed
-                    AppLogger.info("EQEngineService: content mode changed while stopped, re-evaluating")
-                    ProfileManager.shared.reapplyActiveProfile()
-                }
-            }
-            .store(in: &cancellables)
-
-        // Re-evaluate when Sound Modes master toggle changes.
-        // Debounce to handle rapid on/off toggling — only act on the final state.
-        SoundModesStore.shared.$isEnabled
-            .dropFirst()
-            .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
-            .sink { [weak self] enabled in
-                guard let self = self else { return }
-                AppLogger.info("EQEngine: Sound Modes toggled to \(enabled), isRunning=\(self.isRunning)")
-                ProfileManager.shared.reapplyActiveProfile()
-            }
-            .store(in: &cancellables)
-
-        // Live hot-update when overlay settings are edited (e.g., user drags a band in Voice mode editor)
-        SoundModesStore.shared.$overlays
-            .dropFirst() // Skip initial load
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in
-                guard let self = self, self.isRunning, let deviceUID = self.targetDeviceUID else { return }
-                let effective = EQStore.shared.effectiveSettings(for: deviceUID)
-                self.updateSettings(effective)
-            }
-            .store(in: &cancellables)
-
-        // Same for night mode overlay edits
-        SoundModesStore.shared.$nightMode
-            .dropFirst()
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in
-                guard let self = self, self.isRunning, let deviceUID = self.targetDeviceUID else { return }
-                let effective = EQStore.shared.effectiveSettings(for: deviceUID)
-                self.updateSettings(effective)
             }
             .store(in: &cancellables)
     }
 
-    // MARK: - Start EQ pipeline
+    // MARK: - Public: cancelPendingTeardown
 
-    func start(
+    /// Cancel any pending async teardown work item.
+    /// Called from evaluateAndApply() before computing new state.
+    func cancelPendingTeardown() {
+        pendingTeardownWork?.cancel()
+        pendingTeardownWork = nil
+    }
+
+    // MARK: - Start EQ pipeline (state machine)
+
+    func startPipeline(
         realDeviceUID: String,
         settings: EQSettings,
         virtualDeviceName: String
     ) {
         // Cancel any pending async teardown that would overwrite our new default output
-        pendingTeardownWork?.cancel()
-        pendingTeardownWork = nil
+        cancelPendingTeardown()
 
         stopEngineOnly()
 
@@ -174,56 +149,213 @@ final class EQEngineService: ObservableObject {
         gGeneration.pointee &+= 1
         let gen = gGeneration.pointee
 
-        AppLogger.error("[EQ-DIAG] EQEngineService.start() called: '\(virtualDeviceName)' → real=\(realDeviceUID) gen=\(gen)")
+        AppLogger.error("[EQ-DIAG] EQEngineService.startPipeline() called: '\(virtualDeviceName)' → real=\(realDeviceUID) gen=\(gen)")
 
-        // 1. Find and show the virtual device
-        guard let virtualDevice = EQDriverService.shared.findAudioDevice() else {
+        let request = PipelineRequest(
+            realDeviceUID: realDeviceUID,
+            settings: settings,
+            virtualDeviceName: virtualDeviceName,
+            generation: gen
+        )
+        currentRequest = request
+
+        // 1. Find the virtual device
+        guard let _ = EQDriverService.shared.findAudioDevice() else {
             AppLogger.error("EQEngineService: virtual device not found — is the driver installed?")
+            pipelineState = .idle
             return
         }
-        EQDriverService.shared.show(name: virtualDeviceName)
-        // Brief pause for HAL to propagate visibility — 50ms is enough
-        Thread.sleep(forTimeInterval: 0.05)
 
-        // 2. Resolve AudioObjectIDs
-        guard let virtualObjectID = translateUID(virtualDevice.id) else {
-            AppLogger.error("EQEngineService: can't resolve virtual device UID '\(virtualDevice.id)'")
-            stopSafe(switchTo: realDeviceUID)
+        // 2. Register kAudioHardwarePropertyDevices listener BEFORE show() — the notification
+        //    fires synchronously during show(), so the listener must be active first.
+        pipelineState = .preparingDevice
+
+        var devicesAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+
+        let capturedGen = gen
+        let listenerBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                guard capturedGen == gGeneration.pointee else {
+                    self.removeActiveListener()
+                    return
+                }
+                self.handleDeviceAppeared()
+            }
+        }
+
+        activeListenerBlock = listenerBlock
+        activeListenerObjectID = AudioObjectID(kAudioObjectSystemObject)
+        activeListenerAddress = devicesAddr
+
+        AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject),
+            &devicesAddr,
+            DispatchQueue.global(qos: .userInitiated),
+            listenerBlock
+        )
+
+        // Safety timer: if listener doesn't fire within 2s, proceed anyway
+        activeSafetyTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                guard capturedGen == gGeneration.pointee else { return }
+                AppLogger.warning("EQEngineService: safety timer fired for preparingDevice — proceeding anyway")
+                self.handleDeviceAppeared()
+            }
+        }
+
+        // 3. Show the virtual device — the listener above will catch the notification
+        EQDriverService.shared.show(name: virtualDeviceName)
+
+        // 4. If the device was already visible (isShown was already true), the driver
+        //    won't fire a notification. Check immediately and proceed if we can resolve it.
+        if let virtualDevice = EQDriverService.shared.findAudioDevice(),
+           translateUID(virtualDevice.id) != nil {
+            removeActiveListener()
+            invalidateSafetyTimer()
+            handleDeviceAppeared()
+        }
+    }
+
+    // MARK: - State machine: device appeared
+
+    private func handleDeviceAppeared() {
+        // Guard: only process if we're actually waiting for the device
+        guard pipelineState == .preparingDevice else { return }
+        guard let request = currentRequest, request.generation == gGeneration.pointee else {
+            removeActiveListener()
+            invalidateSafetyTimer()
             return
         }
-        guard let realObjectID = translateUID(realDeviceUID) else {
-            AppLogger.error("EQEngineService: can't resolve real device UID '\(realDeviceUID)'")
-            stopSafe(switchTo: realDeviceUID)
+
+        removeActiveListener()
+        invalidateSafetyTimer()
+
+        // Resolve device IDs
+        guard let virtualDevice = EQDriverService.shared.findAudioDevice(),
+              let virtualObjectID = translateUID(virtualDevice.id) else {
+            AppLogger.error("EQEngineService: can't resolve virtual device UID")
+            pipelineState = .idle
+            return
+        }
+        guard let realObjectID = translateUID(request.realDeviceUID) else {
+            AppLogger.error("EQEngineService: can't resolve real device UID '\(request.realDeviceUID)'")
+            stopSafe(switchTo: request.realDeviceUID)
+            pipelineState = .idle
             return
         }
 
         AppLogger.error("[EQ-DIAG] virtualObjID=\(virtualObjectID) realObjID=\(realObjectID)")
 
-        // 3. Match virtual device sample rate to the real device rate.
-        // This avoids automatic sample rate conversion in the output AUHAL
-        // which adds significant latency and CPU overhead.
+        // Match sample rate — register listener BEFORE setting rate (notification fires synchronously)
         let realRate = getDeviceSampleRate(realObjectID) ?? 48000
-        resetVirtualDeviceRate(virtualObjectID, to: realRate)
-        Thread.sleep(forTimeInterval: 0.02)  // Brief pause for HAL to digest rate change
-        let virtualRate = getDeviceSampleRate(virtualObjectID) ?? realRate
+        let currentVirtualRate = getDeviceSampleRate(virtualObjectID) ?? realRate
+
+        if abs(realRate - currentVirtualRate) > 1.0 {
+            // Rates differ — register listener first, then set rate
+            pipelineState = .preparingSampleRate
+            registerSampleRateListener(virtualObjectID: virtualObjectID, request: request)
+            resetVirtualDeviceRate(virtualObjectID, to: realRate)
+        } else {
+            // Rates match — proceed directly to start (no wait needed)
+            finishStart(request: request, virtualObjectID: virtualObjectID, realObjectID: realObjectID)
+        }
+    }
+
+    // MARK: - State machine: sample rate listener
+
+    private func registerSampleRateListener(virtualObjectID: AudioObjectID, request: PipelineRequest) {
+        var sampleRateAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+
+        let capturedGen = request.generation
+        let listenerBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                guard capturedGen == gGeneration.pointee else {
+                    self.removeActiveListener()
+                    return
+                }
+                self.handleSampleRateReady(virtualObjectID: virtualObjectID)
+            }
+        }
+
+        activeListenerBlock = listenerBlock
+        activeListenerObjectID = virtualObjectID
+        activeListenerAddress = sampleRateAddr
+
+        AudioObjectAddPropertyListenerBlock(
+            virtualObjectID,
+            &sampleRateAddr,
+            DispatchQueue.global(qos: .userInitiated),
+            listenerBlock
+        )
+
+        // Safety timer
+        activeSafetyTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                guard capturedGen == gGeneration.pointee else { return }
+                AppLogger.warning("EQEngineService: safety timer fired for preparingSampleRate — proceeding anyway")
+                self.handleSampleRateReady(virtualObjectID: virtualObjectID)
+            }
+        }
+    }
+
+    // MARK: - State machine: sample rate ready
+
+    private func handleSampleRateReady(virtualObjectID: AudioObjectID) {
+        guard pipelineState == .preparingSampleRate else { return }
+        guard let request = currentRequest, request.generation == gGeneration.pointee else {
+            removeActiveListener()
+            invalidateSafetyTimer()
+            return
+        }
+
+        removeActiveListener()
+        invalidateSafetyTimer()
+
+        guard let realObjectID = translateUID(request.realDeviceUID) else {
+            AppLogger.error("EQEngineService: can't resolve real device UID during sample rate ready")
+            pipelineState = .idle
+            return
+        }
+
+        finishStart(request: request, virtualObjectID: virtualObjectID, realObjectID: realObjectID)
+    }
+
+    // MARK: - State machine: finish start (synchronous AU creation)
+
+    private func finishStart(request: PipelineRequest, virtualObjectID: AudioObjectID, realObjectID: AudioObjectID) {
+        pipelineState = .starting
+
+        let virtualRate = getDeviceSampleRate(virtualObjectID) ?? 48000
         let channels: UInt32 = 2
         let eqFormat = makeNonInterleavedFormat(sampleRate: virtualRate, channels: channels)
         let outputFormat = makeNonInterleavedFormat(sampleRate: virtualRate, channels: channels)
         AppLogger.error("[EQ-DIAG] formats: virtualRate=\(virtualRate) ch=\(channels)")
 
         do {
-            // 5. Open shared memory reader (reads from driver's mmap'd file — no TCC!)
+            // Open shared memory reader (reads from driver's mmap'd file — no TCC!)
             guard let reader = SharedAudioReader() else {
                 throw AUError("Open shared memory reader", -1)
             }
             self.sharedReader = reader
 
-            // 6. Create audio units (EQ+output=non-interleaved)
-            let eq     = try createEQUnit(settings: settings, format: eqFormat)
+            // Create audio units (EQ+output=non-interleaved)
+            let eq     = try createEQUnit(settings: request.settings, format: eqFormat)
             let output = try createOutputAUHAL(device: realObjectID, format: outputFormat)
 
-            // 7. Wire output render chain: output ← EQ ← shared memory
-            let eqRef = EQRenderRef(eqUnit: eq, reader: reader, generation: gen)
+            // Wire output render chain: output ← EQ ← shared memory
+            let eqRef = EQRenderRef(eqUnit: eq, reader: reader, generation: request.generation)
             self.eqRenderRef = eqRef
 
             var outputCallbackStruct = AURenderCallbackStruct(
@@ -235,7 +367,7 @@ final class EQEngineService: ObservableObject {
                                            &outputCallbackStruct, UInt32(MemoryLayout<AURenderCallbackStruct>.size))
             guard status == noErr else { throw AUError("Set output render callback", status) }
 
-            // 8. Set EQ render callback to read from shared memory
+            // Set EQ render callback to read from shared memory
             var eqInputCallbackStruct = AURenderCallbackStruct(
                 inputProc: eqInputRenderCallback,
                 inputProcRefCon: Unmanaged.passUnretained(eqRef).toOpaque()
@@ -245,17 +377,17 @@ final class EQEngineService: ObservableObject {
                                            &eqInputCallbackStruct, UInt32(MemoryLayout<AURenderCallbackStruct>.size))
             guard status == noErr else { throw AUError("Set EQ input render callback", status) }
 
-            // 9. Initialize all units
+            // Initialize all units
             status = AudioUnitInitialize(eq)
             guard status == noErr else { throw AUError("Initialize EQ", status) }
 
             status = AudioUnitInitialize(output)
             guard status == noErr else { throw AUError("Initialize output AUHAL", status) }
 
-            // 10. Clear the render-stopped flag before starting IO
+            // Clear the render-stopped flag before starting IO
             OSAtomicCompareAndSwap32(1, 0, gRenderStopped)
 
-            // 11. Start output AUHAL (drives the output render chain)
+            // Start output AUHAL (drives the output render chain)
             status = AudioOutputUnitStart(output)
             guard status == noErr else { throw AUError("Start output AUHAL", status) }
 
@@ -265,13 +397,21 @@ final class EQEngineService: ObservableObject {
         } catch {
             AppLogger.error("EQEngineService: pipeline setup failed: \(error)")
             stopEngineOnly()
-            stopSafe(switchTo: realDeviceUID)
+            stopSafe(switchTo: request.realDeviceUID)
+            pipelineState = .idle
             return
         }
 
         AppLogger.error("[EQ-DIAG] audio units started, setting virtual device as default output")
 
-        // 13. Set virtual device as system default output
+        // Set virtual device as system default output
+        guard let virtualDevice = EQDriverService.shared.findAudioDevice() else {
+            AppLogger.error("EQEngineService: virtual device lost after AU setup")
+            stopEngineOnly()
+            stopSafe(switchTo: request.realDeviceUID)
+            pipelineState = .idle
+            return
+        }
         let controlService = AudioDeviceControlService()
         let setOK = controlService.setDefaultOutputDevice(virtualDevice)
         AppLogger.error("[EQ-DIAG] setDefaultOutputDevice(\(virtualDevice.name)) → \(setOK)")
@@ -279,7 +419,8 @@ final class EQEngineService: ObservableObject {
         if !setOK {
             AppLogger.error("EQEngineService: failed to set virtual device as default — aborting")
             stopEngineOnly()
-            stopSafe(switchTo: realDeviceUID)
+            stopSafe(switchTo: request.realDeviceUID)
+            pipelineState = .idle
             return
         }
 
@@ -287,15 +428,35 @@ final class EQEngineService: ObservableObject {
             AppLogger.info("EQEngineService: verified default output = '\(currentDefault.name)'")
         }
 
-        self.targetDeviceUID = realDeviceUID
+        self.targetDeviceUID = request.realDeviceUID
         self.virtualDeviceID = virtualObjectID
         self.realDeviceID = realObjectID
         self.isRunning = true
+        self.pipelineState = .running
 
         // Sync volume: copy current real device volume to virtual, then listen for changes
         syncVolumeForEQ(virtualID: virtualObjectID, realID: realObjectID)
 
-        AppLogger.error("[EQ-DIAG] pipeline running ✓")
+        AppLogger.error("[EQ-DIAG] pipeline running")
+    }
+
+    // MARK: - Cancel (from any state)
+
+    func cancel() {
+        // Increment generation to make all in-flight callbacks stale
+        gGeneration.pointee &+= 1
+
+        // Clean up active listener and timer
+        removeActiveListener()
+        invalidateSafetyTimer()
+
+        // If AUs exist, stop them
+        if eqAU != nil || outputAU != nil {
+            stopEngineOnly()
+        }
+
+        currentRequest = nil
+        pipelineState = .idle
     }
 
     // MARK: - Switch device (hot-swap without tearing down virtual device)
@@ -310,13 +471,12 @@ final class EQEngineService: ObservableObject {
     ) {
         guard isRunning else {
             // Not running — fall back to full start
-            start(realDeviceUID: realDeviceUID, settings: settings, virtualDeviceName: virtualDeviceName)
+            startPipeline(realDeviceUID: realDeviceUID, settings: settings, virtualDeviceName: virtualDeviceName)
             return
         }
 
         // Cancel any pending async teardown
-        pendingTeardownWork?.cancel()
-        pendingTeardownWork = nil
+        cancelPendingTeardown()
 
         AppLogger.info("EQEngineService: switching device → '\(virtualDeviceName)' real=\(realDeviceUID)")
 
@@ -325,7 +485,6 @@ final class EQEngineService: ObservableObject {
         let gen = gGeneration.pointee
 
         // 2. Restore old real device volume from virtual device before switching away
-        //    so the real device remembers the user's last volume setting.
         if let vID = virtualDeviceID, let rID = realDeviceID {
             let currentVirtualVol = getDeviceVolume(vID)
             setDeviceVolume(rID, volume: currentVirtualVol)
@@ -342,7 +501,7 @@ final class EQEngineService: ObservableObject {
         outputAU = nil
         eqAU = nil
 
-        // 3. Reuse existing virtual device IDs (they don't change during a switch)
+        // 4. Reuse existing virtual device IDs (they don't change during a switch)
         guard let virtualDevice = EQDriverService.shared.findAudioDevice(),
               let virtualObjectID = translateUID(virtualDevice.id) else {
             AppLogger.error("EQEngineService: virtual device lost during switch")
@@ -355,35 +514,57 @@ final class EQEngineService: ObservableObject {
             return
         }
 
-        // 4. Rename virtual device only if name actually changed (avoids HAL notification)
+        // 5. Rename virtual device only if name actually changed
         if virtualDevice.name != virtualDeviceName {
             EQDriverService.shared.show(name: virtualDeviceName)
         }
 
-        // 5. Match sample rates — only change if they differ (avoids HAL notification
-        //    that causes all connected apps to tear down and rebuild their streams)
+        // 6. Match sample rates — only change if they differ
         let realRate = getDeviceSampleRate(realObjectID) ?? 48000
         let currentVirtualRate = getDeviceSampleRate(virtualObjectID) ?? 48000
         if abs(realRate - currentVirtualRate) > 1.0 {
+            // Register listener BEFORE setting rate (notification fires synchronously)
+            let request = PipelineRequest(
+                realDeviceUID: realDeviceUID,
+                settings: settings,
+                virtualDeviceName: virtualDeviceName,
+                generation: gen
+            )
+            currentRequest = request
+            pipelineState = .preparingSampleRate
+            registerSampleRateListener(virtualObjectID: virtualObjectID, request: request)
             resetVirtualDeviceRate(virtualObjectID, to: realRate)
-            Thread.sleep(forTimeInterval: 0.02)
+            return
         }
-        let virtualRate = getDeviceSampleRate(virtualObjectID) ?? realRate
+
+        // Rates already match — proceed directly
+        let request = PipelineRequest(
+            realDeviceUID: realDeviceUID,
+            settings: settings,
+            virtualDeviceName: virtualDeviceName,
+            generation: gen
+        )
+        currentRequest = request
+        finishSwitchDevice(request: request, virtualObjectID: virtualObjectID, realObjectID: realObjectID, gen: gen)
+    }
+
+    private func finishSwitchDevice(request: PipelineRequest, virtualObjectID: AudioObjectID, realObjectID: AudioObjectID, gen: Int32) {
+        let virtualRate = getDeviceSampleRate(virtualObjectID) ?? 48000
         let channels: UInt32 = 2
         let format = makeNonInterleavedFormat(sampleRate: virtualRate, channels: channels)
 
         do {
-            // 6. Fresh shared memory reader
+            // Fresh shared memory reader
             guard let reader = SharedAudioReader() else {
                 throw AUError("Open shared memory reader", -1)
             }
             self.sharedReader = reader
 
-            // 7. Create new audio units
-            let eq     = try createEQUnit(settings: settings, format: format)
+            // Create new audio units
+            let eq     = try createEQUnit(settings: request.settings, format: format)
             let output = try createOutputAUHAL(device: realObjectID, format: format)
 
-            // 8. Wire render chain
+            // Wire render chain
             let eqRef = EQRenderRef(eqUnit: eq, reader: reader, generation: gen)
             self.eqRenderRef = eqRef
 
@@ -405,7 +586,7 @@ final class EQEngineService: ObservableObject {
                                            &eqCB, UInt32(MemoryLayout<AURenderCallbackStruct>.size))
             guard status == noErr else { throw AUError("Set EQ input render callback", status) }
 
-            // 9. Initialize + start
+            // Initialize + start
             status = AudioUnitInitialize(eq)
             guard status == noErr else { throw AUError("Initialize EQ", status) }
             status = AudioUnitInitialize(output)
@@ -422,24 +603,26 @@ final class EQEngineService: ObservableObject {
         } catch {
             AppLogger.error("EQEngineService: switch failed: \(error) — falling back to full restart")
             stopEngineOnly()
-            start(realDeviceUID: realDeviceUID, settings: settings, virtualDeviceName: virtualDeviceName)
+            startPipeline(realDeviceUID: request.realDeviceUID, settings: request.settings, virtualDeviceName: request.virtualDeviceName)
             return
         }
 
-        // 10. Update state (no setDefaultOutputDevice — virtual device is already default)
-        self.targetDeviceUID = realDeviceUID
+        // Update state (no setDefaultOutputDevice — virtual device is already default)
+        self.targetDeviceUID = request.realDeviceUID
         self.virtualDeviceID = virtualObjectID
         self.realDeviceID = realObjectID
+        self.pipelineState = .running
 
-        // 11. Volume: read real device's current volume, apply to virtual, then sync
+        // Volume: read real device's current volume, apply to virtual, then sync
         syncVolumeForEQ(virtualID: virtualObjectID, realID: realObjectID)
 
-        AppLogger.info("EQEngineService: switch complete ✓")
+        AppLogger.info("EQEngineService: switch complete")
     }
 
     // MARK: - Stop
 
     func stopSafe(switchTo realDeviceUID: String) {
+        pipelineState = .stopping
         teardown(switchTo: realDeviceUID, synchronous: false)
     }
 
@@ -448,12 +631,19 @@ final class EQEngineService: ObservableObject {
             EQDriverService.shared.hide()
             return
         }
+        pipelineState = .stopping
         teardown(switchTo: uid, synchronous: false)
     }
 
-    /// Call from applicationWillTerminate only — same as stopSafe but blocks until
-    /// the device switch completes, since the process exits immediately after return.
+    /// Call from applicationWillTerminate only — bypasses state machine entirely.
+    /// Same as stopSafe but blocks until the device switch completes,
+    /// since the process exits immediately after return.
     func stopForTermination() {
+        // Bypass state machine — direct synchronous teardown
+        // Clean up any pending listeners/timers
+        removeActiveListener()
+        invalidateSafetyTimer()
+
         guard isRunning, let uid = targetDeviceUID else {
             EQDriverService.shared.hide()
             return
@@ -475,12 +665,19 @@ final class EQEngineService: ObservableObject {
         virtualDeviceID = nil
         realDeviceID = nil
         isRunning = false
+        pipelineState = .idle
 
-        let work = DispatchWorkItem { [self] in
+        // Two-step pattern: create var first, then assign closure that captures it.
+        var work: DispatchWorkItem!
+        work = DispatchWorkItem { [self] in
+            guard !work.isCancelled else { return }
             let devices = AudioDeviceFactory.getCurrentDevices()
+            guard !work.isCancelled else { return }
             if let realDevice = devices.first(where: { $0.id == realDeviceUID && $0.isOutput }) {
+                guard !work.isCancelled else { return }
                 let ok = AudioDeviceControlService().setDefaultOutputDevice(realDevice)
                 AppLogger.info("EQEngineService: restored default output to '\(realDevice.name)' → \(ok)")
+                guard !work.isCancelled else { return }
                 if let vol = restoreVolume, let realID = translateUID(realDeviceUID) {
                     setDeviceVolume(realID, volume: vol)
                     AppLogger.info("EQEngineService: restored volume to \(String(format: "%.0f%%", vol * 100))")
@@ -510,6 +707,21 @@ final class EQEngineService: ObservableObject {
         AudioUnitSetProperty(eq, kAudioUnitProperty_BypassEffect,
                              kAudioUnitScope_Global, 0,
                              &bypass, UInt32(MemoryLayout<UInt32>.size))
+    }
+
+    // MARK: - Private: Listener / Timer management
+
+    private func removeActiveListener() {
+        guard let block = activeListenerBlock, var addr = activeListenerAddress else { return }
+        AudioObjectRemovePropertyListenerBlock(activeListenerObjectID, &addr, DispatchQueue.global(qos: .userInitiated), block)
+        activeListenerBlock = nil
+        activeListenerAddress = nil
+        activeListenerObjectID = 0
+    }
+
+    private func invalidateSafetyTimer() {
+        activeSafetyTimer?.invalidate()
+        activeSafetyTimer = nil
     }
 
     // MARK: - Private: stop engine
@@ -551,10 +763,6 @@ final class EQEngineService: ObservableObject {
     /// WriteMix path (ioGain = volumeScalar), so the audio in shared memory
     /// is already volume-adjusted — no listener needed.
     private func syncVolumeForEQ(virtualID: AudioObjectID, realID: AudioObjectID) {
-        // Transfer real device's volume to virtual device so user sees correct level.
-        // Then set real device to 100% — the AUHAL writes directly to hardware,
-        // bypassing macOS mixer, so we need max hardware gain. The virtual device's
-        // volume (applied by macOS in its mixer) is the sole volume control.
         let realVolume = getDeviceVolume(realID)
         setDeviceVolume(virtualID, volume: realVolume)
         setDeviceVolume(realID, volume: 1.0)

@@ -11,7 +11,7 @@ struct ProfileMenuView: View {
             HStack {
                 // Profile icon - white for System Default, mode color for others
                 Image(systemName: currentProfileIcon)
-                    .foregroundColor(isSystemDefaultActive ? .white : (profileManager.activeMode == .public ? .blue : .purple))
+                    .foregroundColor(isSystemDefaultActive ? .primary : (profileManager.activeMode == .public ? .blue : .purple))
                     .frame(width: 20, height: 20)
                     .frame(width: 24) // Container for alignment
                 
@@ -42,8 +42,8 @@ struct ProfileMenuView: View {
                     .help("Switch to \(profileManager.activeMode == .public ? "Private" : "Public") mode")
                 }
             }
-            .padding(.leading, 4)
-            
+            .padding(.horizontal, 12)
+
             // Current devices section
             VStack(alignment: .leading, spacing: 4) {
                 if let outputDevice = currentOutputDevice {
@@ -52,12 +52,11 @@ struct ProfileMenuView: View {
                             .foregroundColor(.secondary)
                             .font(.caption)
                             .frame(width: 16, height: 16)
-                            .frame(width: 24) // Container for alignment
+                            .frame(width: 24)
                         Text(outputDevice)
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
-                    .padding(.leading, 4)
                 }
                 if let inputDevice = currentInputDevice {
                     HStack(spacing: 8) {
@@ -65,14 +64,14 @@ struct ProfileMenuView: View {
                             .foregroundColor(.secondary)
                             .font(.caption)
                             .frame(width: 16, height: 16)
-                            .frame(width: 24) // Container for alignment
+                            .frame(width: 24)
                         Text(inputDevice)
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
-                    .padding(.leading, 4)
                 }
             }
+            .padding(.horizontal, 12)
             
             Divider()
 
@@ -199,10 +198,10 @@ struct AutoContentModeRow: View {
     @StateObject private var store = SoundModesStore.shared
 
     var body: some View {
-        HStack(spacing: 0) {
-            // Main toggle button
+        VStack(spacing: 0) {
+            // Main toggle
             Button {
-                store.isEnabled.toggle()
+                store.setEnabled(!store.isEnabled)
             } label: {
                 HStack {
                     Image(systemName: "waveform")
@@ -220,52 +219,55 @@ struct AutoContentModeRow: View {
             }
             .buttonStyle(MenuRowButtonStyle())
 
-            // Mode selector — only when enabled
+            // Expanded mode list when enabled
             if store.isEnabled {
-                Menu {
+                VStack(spacing: 0) {
+                    // Auto option
                     Button {
-                        store.manualOverride = nil
+                        store.setManualOverride(nil)
                     } label: {
                         HStack {
+                            Image(systemName: "sparkles")
+                                .foregroundColor(store.manualOverride == nil ? .accentColor : .secondary)
+                                .frame(width: 14, height: 14)
+                                .frame(width: 20)
                             Text("Auto")
+                                .font(.caption)
+                            Spacer()
                             if store.manualOverride == nil {
                                 Image(systemName: "checkmark")
+                                    .font(.caption)
+                                    .foregroundColor(.accentColor)
                             }
                         }
+                        .padding(.leading, 28)
                     }
+                    .buttonStyle(MenuRowButtonStyle())
 
-                    Divider()
-
+                    // Content modes
                     ForEach(ContentModeType.allCases.filter { $0 != .none }, id: \.self) { mode in
                         Button {
-                            store.manualOverride = mode
+                            store.setManualOverride(mode)
                         } label: {
                             HStack {
-                                Label(mode.displayName, systemImage: mode.iconName)
+                                Image(systemName: mode.iconName)
+                                    .foregroundColor(mode == store.activeContentMode ? .accentColor : .secondary)
+                                    .frame(width: 14, height: 14)
+                                    .frame(width: 20)
+                                Text(mode.displayName)
+                                    .font(.caption)
+                                Spacer()
                                 if store.manualOverride == mode {
                                     Image(systemName: "checkmark")
+                                        .font(.caption)
+                                        .foregroundColor(.accentColor)
                                 }
                             }
+                            .padding(.leading, 28)
                         }
+                        .buttonStyle(MenuRowButtonStyle())
                     }
-                } label: {
-                    HStack(spacing: 3) {
-                        let displayed = store.manualOverride ?? store.activeContentMode
-                        if displayed != .none {
-                            Image(systemName: displayed.iconName)
-                                .font(.caption2)
-                        }
-                        Text(store.manualOverride?.displayName ?? "Auto")
-                            .font(.caption)
-                    }
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
-                    .background(Color.accentColor.opacity(0.15))
-                    .foregroundColor(.accentColor)
-                    .cornerRadius(5)
                 }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
             }
         }
     }

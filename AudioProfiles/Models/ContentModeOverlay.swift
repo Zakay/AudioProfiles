@@ -31,17 +31,6 @@ struct ContentModeOverlay: Codable, Equatable {
         return ContentModeOverlay(mode: .movie, settings: EQSettings(preamp: -1.0, bands: bands), isEnabled: true)
     }
 
-    /// Podcast: speech clarity, less aggressive than voice
-    static func defaultPodcast() -> ContentModeOverlay {
-        var bands = EQSettings.flat.bands
-        bands[0].gain = -1.5   // 32 Hz  — cut rumble
-        bands[1].gain = -1.0   // 64 Hz  — reduce bass
-        bands[5].gain = +1.0   // 1 kHz  — warmth
-        bands[6].gain = +2.0   // 2 kHz  — clarity
-        bands[7].gain = +1.5   // 4 kHz  — presence
-        return ContentModeOverlay(mode: .podcast, settings: EQSettings(preamp: 0, bands: bands), isEnabled: true)
-    }
-
     /// Gaming: spatial/immersive feel
     static func defaultGaming() -> ContentModeOverlay {
         var bands = EQSettings.flat.bands
@@ -70,7 +59,6 @@ struct ContentModeOverlay: Codable, Equatable {
         case .music:   return defaultMusic()
         case .voice:   return defaultVoice()
         case .movie:   return defaultMovie()
-        case .podcast: return defaultPodcast()
         case .gaming:  return defaultGaming()
         }
     }

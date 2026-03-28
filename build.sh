@@ -136,13 +136,20 @@ kill_app_processes() {
 
     if [[ -n "$pids" ]]; then
         print_warning "Found running processes: $pids"
-        pkill -if "${APP_PROJECT_NAME}" || true
-        sleep 1
+        # Graceful quit first — lets applicationWillTerminate run
+        osascript -e "tell application \"${APP_PROJECT_NAME}\" to quit" 2>/dev/null || true
+        sleep 2
         local remaining
         remaining=$(pgrep -if "${APP_PROJECT_NAME}" || true)
         if [[ -n "$remaining" ]]; then
-            pkill -9 -if "${APP_PROJECT_NAME}" || true
+            print_warning "Graceful quit failed, sending SIGTERM..."
+            pkill -if "${APP_PROJECT_NAME}" || true
             sleep 1
+            remaining=$(pgrep -if "${APP_PROJECT_NAME}" || true)
+            if [[ -n "$remaining" ]]; then
+                pkill -9 -if "${APP_PROJECT_NAME}" || true
+                sleep 1
+            fi
         fi
         print_success "Existing processes terminated."
     else

@@ -1,6 +1,7 @@
 import Foundation
 
 /// Handles profile validation and cleanup operations
+@MainActor
 class ProfileValidationService {
     
     private let deviceFilterService = DeviceFilterService()

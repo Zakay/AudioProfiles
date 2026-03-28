@@ -7,9 +7,10 @@ import Combine
 /// **Architecture Role**: Service & Coordinator
 /// **Usage**: Public API via shared singleton
 /// **Dependencies**: AudioDeviceMonitor, ProfileManager, AudioDeviceHistoryService, NotificationService
+@MainActor
 class ProfileTriggerService {
     static let shared = ProfileTriggerService()
-    let triggerSubject = PassthroughSubject<UUID, Never>()
+    // triggerSubject removed — direct calls to ProfileManager.shared.activateProfileFromTrigger()
     private var lastEvaluatedDevices: Set<String> = []
     
     // MARK: - Analysis Result
@@ -192,7 +193,7 @@ class ProfileTriggerService {
                     )
                 }
             }
-            triggerSubject.send(match.profile.id)
+            ProfileManager.shared.activateProfileFromTrigger(id: match.profile.id)
         }
     }
     
@@ -217,7 +218,7 @@ class ProfileTriggerService {
                     lostTriggerDevice: lostDevice
                 )
                 
-                triggerSubject.send(systemDefaultProfile.id)
+                ProfileManager.shared.activateProfileFromTrigger(id: systemDefaultProfile.id)
             }
         } else {
             AppLogger.warning("⚠️ No System Default profile found to fall back to")
