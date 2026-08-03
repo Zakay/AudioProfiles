@@ -168,9 +168,13 @@ class AudioDeviceHistoryService: ObservableObject {
         // Update existing entries - mark as inactive if not currently present
         for (deviceID, entry) in deviceHistory {
             let isCurrentlyActive = currentDeviceIDs.contains(deviceID)
+            // connectedAt advances only on a disconnected → connected transition;
+            // otherwise it is preserved so unrelated device events don't refresh it.
+            let connectedAt = (isCurrentlyActive && !entry.isCurrentlyActive) ? timestamp : entry.connectedAt
             updatedHistory[deviceID] = DeviceHistoryEntry(
                 device: entry.device,
                 lastSeen: isCurrentlyActive ? timestamp : entry.lastSeen,
+                connectedAt: connectedAt,
                 isCurrentlyActive: isCurrentlyActive
             )
         }
@@ -194,18 +198,21 @@ class AudioDeviceHistoryService: ObservableObject {
         
         // Add new devices to history
         for device in devices {
-            if updatedHistory[device.id] == nil {
-                // Completely new device
-                updatedHistory[device.id] = DeviceHistoryEntry(
-                    device: device,
-                    lastSeen: timestamp,
-                    isCurrentlyActive: true
-                )
-            } else {
-                // Update existing device to ensure it's marked as active and has latest device info
+            if let existing = updatedHistory[device.id] {
+                // Already reconciled by updateExistingEntries (which handled any
+                // reconnect transition) — preserve its connectedAt, refresh the rest.
                 updatedHistory[device.id] = DeviceHistoryEntry(
                     device: device, // Use the current device data (might have updated properties)
                     lastSeen: timestamp,
+                    connectedAt: existing.connectedAt,
+                    isCurrentlyActive: true
+                )
+            } else {
+                // Completely new device — its first appearance is its connection time
+                updatedHistory[device.id] = DeviceHistoryEntry(
+                    device: device,
+                    lastSeen: timestamp,
+                    connectedAt: timestamp,
                     isCurrentlyActive: true
                 )
             }

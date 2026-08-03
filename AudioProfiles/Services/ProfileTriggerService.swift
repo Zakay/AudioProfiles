@@ -312,7 +312,15 @@ class ProfileTriggerService {
                 return // Manual override is blocking this trigger
             }
         }
-        
+
+        // 2.6. No-match manual-override protection.
+        // If no trigger matched and the user has an active manual selection, an
+        // unrelated device event must not clobber it by falling back to System Default.
+        if !isManualTrigger, matchResult == nil, ProfileManager.shared.hasActiveManualOverride {
+            AppLogger.info("No trigger matched but a manual override is active — keeping current profile")
+            return
+        }
+
         // 3. Apply the best matching profile or handle fallback
         applyProfileOrFallback(
             matchResult: matchResult,

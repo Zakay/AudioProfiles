@@ -271,7 +271,7 @@ struct NightModeConfig: Equatable {
 
 struct DeviceHistoryEntry {
     let device: AudioDevice
-    var firstSeen: Date
+    var connectedAt: Date
     var lastSeen: Date
     var isCurrentlyActive: Bool
 }
@@ -345,9 +345,15 @@ func performHistoryUpdate(
     let currentIDs = Set(devices.map { $0.id })
 
     for device in devices {
+        // connectedAt advances only on a disconnected → connected transition
+        // (new device, or one that was previously inactive); otherwise it is
+        // preserved so unrelated device events don't refresh it.
+        let existing = updated[device.id]
+        let wasActive = existing?.isCurrentlyActive ?? false
+        let connectedAt = wasActive ? (existing?.connectedAt ?? now) : now
         updated[device.id] = DeviceHistoryEntry(
             device: device,
-            firstSeen: updated[device.id]?.firstSeen ?? now,
+            connectedAt: connectedAt,
             lastSeen: now,
             isCurrentlyActive: true
         )
@@ -1060,14 +1066,14 @@ do {
 }
 
 do {
-    // firstSeen preserved across updates
+    // connectedAt preserved across updates
     let t1 = Date().addingTimeInterval(-7200)
     let t2 = Date()
 
     var history = performHistoryUpdate([:], with: [speakers], now: t1)
     history = performHistoryUpdate(history, with: [speakers], now: t2)
 
-    checkEqual(history["speakers-uid"]!.firstSeen, t1, "firstSeen preserved from first update")
+    checkEqual(history["speakers-uid"]!.connectedAt, t1, "connectedAt preserved from first update")
     checkEqual(history["speakers-uid"]!.lastSeen, t2, "lastSeen updated")
 }
 
@@ -1083,8 +1089,8 @@ do {
     let recent = now.addingTimeInterval(-1 * 24 * 3600)  // 1 day ago
 
     let history: [String: DeviceHistoryEntry] = [
-        "old-uid": DeviceHistoryEntry(device: speakers, firstSeen: old, lastSeen: old, isCurrentlyActive: false),
-        "recent-uid": DeviceHistoryEntry(device: headphones, firstSeen: recent, lastSeen: recent, isCurrentlyActive: false),
+        "old-uid": DeviceHistoryEntry(device: speakers, connectedAt: old, lastSeen: old, isCurrentlyActive: false),
+        "recent-uid": DeviceHistoryEntry(device: headphones, connectedAt: recent, lastSeen: recent, isCurrentlyActive: false),
     ]
     let cutoff = now.addingTimeInterval(-30 * 24 * 3600)
     let pruned = pruneHistory(history, olderThan: cutoff)
@@ -1110,7 +1116,7 @@ do {
     let now = Date()
     let old = now.addingTimeInterval(-31 * 24 * 3600)
     let history: [String: DeviceHistoryEntry] = [
-        "old-uid": DeviceHistoryEntry(device: speakers, firstSeen: old, lastSeen: old, isCurrentlyActive: false),
+        "old-uid": DeviceHistoryEntry(device: speakers, connectedAt: old, lastSeen: old, isCurrentlyActive: false),
     ]
     let cutoff = now.addingTimeInterval(-30 * 24 * 3600)
     // With empty profileReferencedIDs (simulates init-time state), old device IS pruned
@@ -1130,9 +1136,9 @@ do {
     let old = now.addingTimeInterval(-31 * 24 * 3600)
     let cutoff = now.addingTimeInterval(-30 * 24 * 3600)
     let history: [String: DeviceHistoryEntry] = [
-        "protected-uid": DeviceHistoryEntry(device: speakers, firstSeen: old, lastSeen: old, isCurrentlyActive: false),
-        "unprotected-uid": DeviceHistoryEntry(device: headphones, firstSeen: old, lastSeen: old, isCurrentlyActive: false),
-        "recent-uid": DeviceHistoryEntry(device: builtinOutput, firstSeen: recent, lastSeen: recent, isCurrentlyActive: false),
+        "protected-uid": DeviceHistoryEntry(device: speakers, connectedAt: old, lastSeen: old, isCurrentlyActive: false),
+        "unprotected-uid": DeviceHistoryEntry(device: headphones, connectedAt: old, lastSeen: old, isCurrentlyActive: false),
+        "recent-uid": DeviceHistoryEntry(device: builtinOutput, connectedAt: recent, lastSeen: recent, isCurrentlyActive: false),
     ]
     let pruned = pruneHistory(history, olderThan: cutoff, profileReferencedIDs: ["protected-uid"])
     checkEqual(pruned.count, 2, "Protected + recent survive, unprotected pruned")
@@ -1153,8 +1159,8 @@ do {
     let cutoff = now.addingTimeInterval(-30 * 24 * 3600)
 
     let history: [String: DeviceHistoryEntry] = [
-        "speakers-uid": DeviceHistoryEntry(device: speakers, firstSeen: recent, lastSeen: recent, isCurrentlyActive: true),
-        "beyerdynamic-uid": DeviceHistoryEntry(device: headphones, firstSeen: recent, lastSeen: recent, isCurrentlyActive: false),
+        "speakers-uid": DeviceHistoryEntry(device: speakers, connectedAt: recent, lastSeen: recent, isCurrentlyActive: true),
+        "beyerdynamic-uid": DeviceHistoryEntry(device: headphones, connectedAt: recent, lastSeen: recent, isCurrentlyActive: false),
     ]
 
     let previous = getPreviouslySeen(history: history, excluding: [speakers], cutoff: cutoff)
@@ -1168,7 +1174,7 @@ do {
     let cutoff = now.addingTimeInterval(-30 * 24 * 3600)
 
     let history: [String: DeviceHistoryEntry] = [
-        "old-uid": DeviceHistoryEntry(device: headphones, firstSeen: old, lastSeen: old, isCurrentlyActive: false),
+        "old-uid": DeviceHistoryEntry(device: headphones, connectedAt: old, lastSeen: old, isCurrentlyActive: false),
     ]
 
     let previous = getPreviouslySeen(history: history, excluding: [], cutoff: cutoff)
@@ -1181,7 +1187,7 @@ do {
     let cutoff = now.addingTimeInterval(-30 * 24 * 3600)
 
     let history: [String: DeviceHistoryEntry] = [
-        "speakers-uid": DeviceHistoryEntry(device: speakers, firstSeen: now, lastSeen: now, isCurrentlyActive: true),
+        "speakers-uid": DeviceHistoryEntry(device: speakers, connectedAt: now, lastSeen: now, isCurrentlyActive: true),
     ]
 
     let previous = getPreviouslySeen(history: history, excluding: [], cutoff: cutoff)
@@ -1519,7 +1525,7 @@ do {
     let old = now.addingTimeInterval(-60 * 24 * 3600)  // 60 days ago
 
     let history: [String: DeviceHistoryEntry] = [
-        "conference-speakers-uid": DeviceHistoryEntry(device: speakers, firstSeen: old, lastSeen: old, isCurrentlyActive: false),
+        "conference-speakers-uid": DeviceHistoryEntry(device: speakers, connectedAt: old, lastSeen: old, isCurrentlyActive: false),
     ]
     let cutoff = now.addingTimeInterval(-30 * 24 * 3600)
     let profileRefs: Set<String> = ["conference-speakers-uid"]  // Referenced by a profile
@@ -1535,7 +1541,7 @@ do {
     let old = now.addingTimeInterval(-60 * 24 * 3600)
 
     let history: [String: DeviceHistoryEntry] = [
-        "orphan-device-uid": DeviceHistoryEntry(device: speakers, firstSeen: old, lastSeen: old, isCurrentlyActive: false),
+        "orphan-device-uid": DeviceHistoryEntry(device: speakers, connectedAt: old, lastSeen: old, isCurrentlyActive: false),
     ]
     let cutoff = now.addingTimeInterval(-30 * 24 * 3600)
     let profileRefs: Set<String> = []  // Not referenced
@@ -1551,9 +1557,9 @@ do {
     let recent = now.addingTimeInterval(-1 * 24 * 3600)
 
     let history: [String: DeviceHistoryEntry] = [
-        "old-referenced": DeviceHistoryEntry(device: speakers, firstSeen: old, lastSeen: old, isCurrentlyActive: false),
-        "old-unreferenced": DeviceHistoryEntry(device: headphones, firstSeen: old, lastSeen: old, isCurrentlyActive: false),
-        "recent-unreferenced": DeviceHistoryEntry(device: bluetooth, firstSeen: recent, lastSeen: recent, isCurrentlyActive: false),
+        "old-referenced": DeviceHistoryEntry(device: speakers, connectedAt: old, lastSeen: old, isCurrentlyActive: false),
+        "old-unreferenced": DeviceHistoryEntry(device: headphones, connectedAt: old, lastSeen: old, isCurrentlyActive: false),
+        "recent-unreferenced": DeviceHistoryEntry(device: bluetooth, connectedAt: recent, lastSeen: recent, isCurrentlyActive: false),
     ]
     let cutoff = now.addingTimeInterval(-30 * 24 * 3600)
     let profileRefs: Set<String> = ["old-referenced"]
@@ -1571,7 +1577,7 @@ do {
     let old = now.addingTimeInterval(-90 * 24 * 3600)  // 90 days old
 
     let history: [String: DeviceHistoryEntry] = [
-        "trigger-device": DeviceHistoryEntry(device: speakers, firstSeen: old, lastSeen: old, isCurrentlyActive: false),
+        "trigger-device": DeviceHistoryEntry(device: speakers, connectedAt: old, lastSeen: old, isCurrentlyActive: false),
     ]
     let cutoff = now.addingTimeInterval(-30 * 24 * 3600)
     let profileRefs: Set<String> = ["trigger-device"]
@@ -1586,7 +1592,7 @@ do {
     let old = now.addingTimeInterval(-45 * 24 * 3600)
 
     let history: [String: DeviceHistoryEntry] = [
-        "shared-device": DeviceHistoryEntry(device: speakers, firstSeen: old, lastSeen: old, isCurrentlyActive: false),
+        "shared-device": DeviceHistoryEntry(device: speakers, connectedAt: old, lastSeen: old, isCurrentlyActive: false),
     ]
     let cutoff = now.addingTimeInterval(-30 * 24 * 3600)
     // Simulates being in 3 profiles' priority lists
@@ -2157,10 +2163,12 @@ func stateMachineTransition(
 struct TriggerDeviceEntry {
     let deviceID: String
     let isCurrentlyActive: Bool
-    let lastSeen: Date
+    let connectedAt: Date
 }
 
-/// Pure function mirroring ProfileManager.shouldApplyTrigger() (lines 391-415).
+/// Pure function mirroring ProfileManager.shouldApplyTrigger().
+/// Compares `connectedAt` (not `lastSeen`) so an unrelated device event that merely
+/// refreshes lastSeen cannot resurrect an old trigger and override a manual selection.
 func shouldApplyTriggerPure(
     lastManualSwitch: Date?,
     triggerEntries: [TriggerDeviceEntry]
@@ -2169,7 +2177,7 @@ func shouldApplyTriggerPure(
         return true  // No manual switch → always allow
     }
     for entry in triggerEntries {
-        if entry.isCurrentlyActive && entry.lastSeen > lastManualSwitch {
+        if entry.isCurrentlyActive && entry.connectedAt > lastManualSwitch {
             return true  // Device connected after manual switch → allow
         }
     }
@@ -2445,7 +2453,7 @@ section("Manual Override Timestamp Logic (Bug 3)")
 
 // Positive: No manual switch → always allow
 do {
-    let entries = [TriggerDeviceEntry(deviceID: "speakers-uid", isCurrentlyActive: true, lastSeen: Date())]
+    let entries = [TriggerDeviceEntry(deviceID: "speakers-uid", isCurrentlyActive: true, connectedAt: Date())]
     let result = shouldApplyTriggerPure(lastManualSwitch: nil, triggerEntries: entries)
     check(result, "No manual switch timestamp → allow trigger")
 }
@@ -2453,14 +2461,14 @@ do {
 // Positive: Device connected after manual switch → allow
 do {
     let manualSwitch = Date().addingTimeInterval(-60)  // 1 minute ago
-    let entries = [TriggerDeviceEntry(deviceID: "speakers-uid", isCurrentlyActive: true, lastSeen: Date())]
+    let entries = [TriggerDeviceEntry(deviceID: "speakers-uid", isCurrentlyActive: true, connectedAt: Date())]
     let result = shouldApplyTriggerPure(lastManualSwitch: manualSwitch, triggerEntries: entries)
     check(result, "Device connected after manual switch → allow")
 }
 
 // Positive: Device connected before manual switch → block
 do {
-    let entries = [TriggerDeviceEntry(deviceID: "speakers-uid", isCurrentlyActive: true, lastSeen: Date().addingTimeInterval(-120))]
+    let entries = [TriggerDeviceEntry(deviceID: "speakers-uid", isCurrentlyActive: true, connectedAt: Date().addingTimeInterval(-120))]
     let manualSwitch = Date().addingTimeInterval(-60)
     let result = shouldApplyTriggerPure(lastManualSwitch: manualSwitch, triggerEntries: entries)
     check(!result, "Device connected before manual switch → block")
@@ -2470,8 +2478,8 @@ do {
 do {
     let manualSwitch = Date().addingTimeInterval(-60)
     let entries = [
-        TriggerDeviceEntry(deviceID: "speakers-uid", isCurrentlyActive: true, lastSeen: Date().addingTimeInterval(-120)),
-        TriggerDeviceEntry(deviceID: "headphones-uid", isCurrentlyActive: true, lastSeen: Date())
+        TriggerDeviceEntry(deviceID: "speakers-uid", isCurrentlyActive: true, connectedAt: Date().addingTimeInterval(-120)),
+        TriggerDeviceEntry(deviceID: "headphones-uid", isCurrentlyActive: true, connectedAt: Date())
     ]
     let result = shouldApplyTriggerPure(lastManualSwitch: manualSwitch, triggerEntries: entries)
     check(result, "One device connected after manual switch → allow (any-match)")
@@ -2481,8 +2489,8 @@ do {
 do {
     let manualSwitch = Date().addingTimeInterval(-60)
     let entries = [
-        TriggerDeviceEntry(deviceID: "speakers-uid", isCurrentlyActive: true, lastSeen: Date().addingTimeInterval(-120)),
-        TriggerDeviceEntry(deviceID: "headphones-uid", isCurrentlyActive: true, lastSeen: Date().addingTimeInterval(-120))
+        TriggerDeviceEntry(deviceID: "speakers-uid", isCurrentlyActive: true, connectedAt: Date().addingTimeInterval(-120)),
+        TriggerDeviceEntry(deviceID: "headphones-uid", isCurrentlyActive: true, connectedAt: Date().addingTimeInterval(-120))
     ]
     let result = shouldApplyTriggerPure(lastManualSwitch: manualSwitch, triggerEntries: entries)
     check(!result, "All devices connected before manual switch → block")
@@ -2490,7 +2498,7 @@ do {
 
 // Regression (Bug 3): nil timestamp after force-quit → allows all
 do {
-    let entries = [TriggerDeviceEntry(deviceID: "speakers-uid", isCurrentlyActive: true, lastSeen: Date().addingTimeInterval(-3600))]
+    let entries = [TriggerDeviceEntry(deviceID: "speakers-uid", isCurrentlyActive: true, connectedAt: Date().addingTimeInterval(-3600))]
     let result = shouldApplyTriggerPure(lastManualSwitch: nil, triggerEntries: entries)
     check(result, "Force-quit (nil timestamp) → allows all triggers")
 }
@@ -2498,9 +2506,9 @@ do {
 // Negative: Device in history but not currently active → block
 do {
     let manualSwitch = Date().addingTimeInterval(-60)
-    let entries = [TriggerDeviceEntry(deviceID: "speakers-uid", isCurrentlyActive: false, lastSeen: Date())]
+    let entries = [TriggerDeviceEntry(deviceID: "speakers-uid", isCurrentlyActive: false, connectedAt: Date())]
     let result = shouldApplyTriggerPure(lastManualSwitch: manualSwitch, triggerEntries: entries)
-    check(!result, "Device not currently active → block even if lastSeen is after manual switch")
+    check(!result, "Device not currently active → block even if connectedAt is after manual switch")
 }
 
 // Negative: Empty trigger entries → block
@@ -2508,6 +2516,93 @@ do {
     let manualSwitch = Date().addingTimeInterval(-60)
     let result = shouldApplyTriggerPure(lastManualSwitch: manualSwitch, triggerEntries: [])
     check(!result, "Empty trigger entries → block")
+}
+
+// ============================================================================
+// MARK: - Regression: Manual override survives unrelated device events (Bug #2)
+// ============================================================================
+
+section("Manual override survives unrelated device events (Bug #2)")
+
+// The core bug: history refreshed lastSeen for EVERY connected device on any event,
+// so plugging in an unrelated device made an old trigger look "connected after" the
+// manual switch. connectedAt (advanced only on reconnect) fixes this.
+do {
+    let t0 = Date().addingTimeInterval(-300)   // trigger device connected 5 min ago
+    let t1 = Date().addingTimeInterval(-120)   // user manually switched 2 min ago
+    let t2 = Date().addingTimeInterval(-30)    // unrelated device plugged in 30s ago
+
+    // Trigger device connected before the manual switch and stays connected throughout.
+    var history = performHistoryUpdate([:], with: [speakers], now: t0)
+    // An unrelated device is plugged in after the manual switch.
+    history = performHistoryUpdate(history, with: [speakers, headphones], now: t2)
+
+    // The unrelated event refreshes the trigger device's lastSeen, but NOT connectedAt.
+    checkEqual(history["speakers-uid"]!.lastSeen, t2, "Unrelated event refreshes lastSeen")
+    checkEqual(history["speakers-uid"]!.connectedAt, t0, "connectedAt unchanged by unrelated event")
+
+    let entry = history["speakers-uid"]!
+    let triggerEntries = [TriggerDeviceEntry(
+        deviceID: "speakers-uid",
+        isCurrentlyActive: entry.isCurrentlyActive,
+        connectedAt: entry.connectedAt
+    )]
+    let result = shouldApplyTriggerPure(lastManualSwitch: t1, triggerEntries: triggerEntries)
+    check(!result, "Trigger predating manual switch stays blocked despite unrelated plug-in (Bug #2)")
+}
+
+// Counter-case: the trigger device itself reconnects after the manual switch → allow.
+do {
+    let t0 = Date().addingTimeInterval(-300)
+    let t1 = Date().addingTimeInterval(-120)
+    let t2 = Date().addingTimeInterval(-30)
+
+    var history = performHistoryUpdate([:], with: [speakers], now: t0)   // first connect
+    history = performHistoryUpdate(history, with: [], now: t1)           // disconnect
+    history = performHistoryUpdate(history, with: [speakers], now: t2)   // reconnect after manual switch
+
+    checkEqual(history["speakers-uid"]!.connectedAt, t2, "Reconnect advances connectedAt")
+
+    let entry = history["speakers-uid"]!
+    let triggerEntries = [TriggerDeviceEntry(
+        deviceID: "speakers-uid",
+        isCurrentlyActive: entry.isCurrentlyActive,
+        connectedAt: entry.connectedAt
+    )]
+    let result = shouldApplyTriggerPure(lastManualSwitch: t1, triggerEntries: triggerEntries)
+    check(result, "Trigger reconnected after manual switch → allow (deliberate re-plug)")
+}
+
+// ============================================================================
+// MARK: - Regression: No-match fallback respects manual override (Bug #6)
+// ============================================================================
+
+section("No-match fallback respects manual override (Bug #6)")
+
+// Mirrors ProfileTriggerService.evaluateTriggers: an automatic device event that
+// matches no trigger must not fall back to System Default while a manual override
+// is active. Manual re-evaluation still falls back (matches the match-path convention).
+func shouldFallBackToSystemDefault(isManualTrigger: Bool, hasMatch: Bool, hasActiveManualOverride: Bool) -> Bool {
+    if hasMatch { return false }
+    if !isManualTrigger && hasActiveManualOverride { return false }
+    return true
+}
+
+do {
+    let r = shouldFallBackToSystemDefault(isManualTrigger: false, hasMatch: false, hasActiveManualOverride: true)
+    check(!r, "Automatic no-match with active manual override → keep manual profile (Bug #6)")
+}
+do {
+    let r = shouldFallBackToSystemDefault(isManualTrigger: false, hasMatch: false, hasActiveManualOverride: false)
+    check(r, "Automatic no-match without override → fall back to System Default")
+}
+do {
+    let r = shouldFallBackToSystemDefault(isManualTrigger: true, hasMatch: false, hasActiveManualOverride: true)
+    check(r, "Manual re-evaluation with no match still falls back (explicit request)")
+}
+do {
+    let r = shouldFallBackToSystemDefault(isManualTrigger: false, hasMatch: true, hasActiveManualOverride: true)
+    check(!r, "A match is handled by the apply path, not the fallback")
 }
 
 // ============================================================================

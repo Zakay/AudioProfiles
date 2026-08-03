@@ -357,6 +357,11 @@ class ProfileManager: ObservableObject {
     // updateRemainingTimeDisplay and getRemainingDisableTime removed —
     // auto-switching is now a simple on/off toggle with no timed duration.
 
+    /// True while a manual profile selection is overriding automatic switching.
+    /// Used to protect the manual choice from being clobbered by unrelated device
+    /// events that match no trigger (see `ProfileTriggerService.evaluateTriggers`).
+    var hasActiveManualOverride: Bool { lastManualSwitchTimestamp != nil }
+
     /// Check if a trigger should be applied based on device connection timestamps
     /// Returns true if the trigger device was connected after the last manual switch
     func shouldApplyTrigger(forDeviceIDs triggerDeviceIDs: [String]) -> Bool {
@@ -371,8 +376,10 @@ class ProfileManager: ObservableObject {
         for deviceID in triggerDeviceIDs {
             if let deviceEntry = deviceHistoryService.deviceHistory[deviceID],
                deviceEntry.isCurrentlyActive,
-               deviceEntry.lastSeen > lastManualSwitch {
+               deviceEntry.connectedAt > lastManualSwitch {
                 // This trigger device was connected after manual switch - allow trigger
+                // (connectedAt, not lastSeen — so an unrelated device event that merely
+                //  refreshes lastSeen cannot resurrect an old trigger and override the user)
                 AppLogger.info("Trigger device '\(deviceEntry.device.name)' connected after manual switch - allowing auto-switch")
                 return true
             }
