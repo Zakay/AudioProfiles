@@ -76,9 +76,14 @@ final class EQEngineService: ObservableObject {
     private var virtualDeviceID: AudioObjectID?
     private var realDeviceID: AudioObjectID?
 
+    private let outputStateService = AudioOutputStateService()
+
     /// Cancellable async teardown work — prevents a pending stopSafe from
     /// overwriting the default output device after a new start().
     private var pendingTeardownWork: DispatchWorkItem?
+    private var pendingTeardownToken: UUID?
+    private var pendingRoutedHardwareState: AudioOutputState?
+    private var internallyRequestedOutputUIDs: Set<String> = []
 
     private var cancellables = Set<AnyCancellable>()
 
@@ -108,18 +113,36 @@ final class EQEngineService: ObservableObject {
         AudioDeviceMonitor.shared.serviceRestartedSubject
             .receive(on: DispatchQueue.main)
             .sink { [weak self] in
-                guard let self = self, self.isRunning else { return }
+                guard let self = self, self.pipelineState != .idle else { return }
                 AppLogger.info("EQEngineService: coreaudiod restarted — tearing down pipeline")
                 // gRenderStopped already set by the direct listener above
                 // Don't call AudioOutputUnitStop/Dispose — AUs are dead
+                gGeneration.pointee &+= 1
+                self.removeActiveListener()
+                self.invalidateSafetyTimer()
+                self.pendingTeardownWork?.cancel()
+                self.pendingTeardownWork = nil
+                self.pendingTeardownToken = nil
+                self.pendingRoutedHardwareState = nil
+                self.internallyRequestedOutputUIDs.removeAll()
                 self.outputAU = nil
                 self.eqAU     = nil
                 // Keep eqRenderRef alive —
                 // an IO thread may still be mid-callback with a pointer to it.
                 self.targetDeviceUID = nil
+                self.virtualDeviceID = nil
+                self.realDeviceID = nil
                 self.isRunning = false
+                self.currentRequest = nil
                 self.pipelineState = .idle
                 EQDriverService.shared.hide()
+            }
+            .store(in: &cancellables)
+
+        AudioDeviceMonitor.shared.defaultOutputChangesSubject
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] device in
+                self?.handleDefaultOutputChanged(to: device)
             }
             .store(in: &cancellables)
     }
@@ -129,8 +152,33 @@ final class EQEngineService: ObservableObject {
     /// Cancel any pending async teardown work item.
     /// Called from evaluateAndApply() before computing new state.
     func cancelPendingTeardown() {
+        let shouldRestoreRoute = pipelineState == .stopping && isRunning
         pendingTeardownWork?.cancel()
         pendingTeardownWork = nil
+        pendingTeardownToken = nil
+        internallyRequestedOutputUIDs.removeAll()
+
+        guard shouldRestoreRoute else {
+            pendingRoutedHardwareState = nil
+            return
+        }
+
+        if let realID = realDeviceID, let routedState = pendingRoutedHardwareState {
+            _ = outputStateService.applyAndVerify(
+                routedState,
+                to: realID,
+                context: "cancelling pending EQ teardown"
+            )
+        }
+        pendingRoutedHardwareState = nil
+
+        if let virtualDevice = EQDriverService.shared.findAudioDevice() {
+            let restored = AudioDeviceControlService().setDefaultOutputDevice(virtualDevice)
+            if !restored {
+                AppLogger.error("EQEngineService: cancelled teardown but could not restore virtual default")
+            }
+        }
+        pipelineState = .running
     }
 
     // MARK: - Start EQ pipeline (state machine)
@@ -404,7 +452,8 @@ final class EQEngineService: ObservableObject {
 
         AppLogger.error("[EQ-DIAG] audio units started, setting virtual device as default output")
 
-        // Set virtual device as system default output
+        // Snapshot the hardware state before touching either endpoint. Transfer
+        // it to the virtual driver and verify it before making the driver default.
         guard let virtualDevice = EQDriverService.shared.findAudioDevice() else {
             AppLogger.error("EQEngineService: virtual device lost after AU setup")
             stopEngineOnly()
@@ -412,6 +461,27 @@ final class EQEngineService: ObservableObject {
             pipelineState = .idle
             return
         }
+        guard let hardwareState = outputStateService.readReliableHardwareState(from: realObjectID) else {
+            AppLogger.error("EQEngineService: could not snapshot hardware state before virtual switch")
+            stopEngineOnly()
+            stopSafe(switchTo: request.realDeviceUID)
+            pipelineState = .idle
+            return
+        }
+        let initialVirtualState = outputStateService.virtualStateRepresentingHardware(hardwareState)
+        guard outputStateService.applyAndVerify(
+            initialVirtualState,
+            to: virtualObjectID,
+            context: "preparing virtual output for \(request.virtualDeviceName)"
+        ) else {
+            AppLogger.error("EQEngineService: could not initialize virtual volume/mute state")
+            stopEngineOnly()
+            stopSafe(switchTo: request.realDeviceUID)
+            pipelineState = .idle
+            return
+        }
+
+        // Set virtual device as system default output.
         let controlService = AudioDeviceControlService()
         let setOK = controlService.setDefaultOutputDevice(virtualDevice)
         AppLogger.error("[EQ-DIAG] setDefaultOutputDevice(\(virtualDevice.name)) → \(setOK)")
@@ -420,6 +490,28 @@ final class EQEngineService: ObservableObject {
             AppLogger.error("EQEngineService: failed to set virtual device as default — aborting")
             stopEngineOnly()
             stopSafe(switchTo: request.realDeviceUID)
+            pipelineState = .idle
+            return
+        }
+
+        // Only after the virtual device owns the user's state, remove the second
+        // gain/mute stage from the physical endpoint.
+        guard outputStateService.applyAndVerify(
+            outputStateService.fullState(matching: hardwareState),
+            to: realObjectID,
+            context: "maxing and unmuting hardware behind \(request.virtualDeviceName)"
+        ) else {
+            AppLogger.error("EQEngineService: hardware could not be prepared — rolling back virtual route")
+            _ = outputStateService.applyAndVerify(
+                hardwareState,
+                to: realObjectID,
+                context: "rolling back failed virtual start"
+            )
+            if let realDevice = AudioDeviceFactory.createAudioDevice(from: realObjectID) {
+                _ = controlService.setDefaultOutputDevice(realDevice)
+            }
+            stopEngineOnly()
+            EQDriverService.shared.hide()
             pipelineState = .idle
             return
         }
@@ -433,11 +525,11 @@ final class EQEngineService: ObservableObject {
         self.realDeviceID = realObjectID
         self.isRunning = true
         self.pipelineState = .running
+        EQRouteRecoveryStore.save(request.realDeviceUID)
 
-        // Sync volume: copy current real device volume to virtual, then listen for changes
-        syncVolumeForEQ(virtualID: virtualObjectID, realID: realObjectID)
-
-        AppLogger.error("[EQ-DIAG] pipeline running")
+        AppLogger.error(
+            "[EQ-DIAG] pipeline running — virtual state transferred, hardware verified at 100%/unmuted"
+        )
     }
 
     // MARK: - Cancel (from any state)
@@ -485,16 +577,26 @@ final class EQEngineService: ObservableObject {
 
         AppLogger.info("EQEngineService: switching device → '\(virtualDeviceName)' real=\(realDeviceUID)")
 
-        // 1. Increment generation — stale callbacks from old pipeline bail out immediately
+        // 1. Restore the complete user-visible state to the old hardware before
+        // disconnecting its AUHAL. If this cannot be verified, keep the working route.
+        if let vID = virtualDeviceID, let rID = realDeviceID {
+            guard let virtualState = outputStateService.readRequiredVirtualState(from: vID) else {
+                AppLogger.error("EQEngineService: refusing device switch because virtual state could not be read")
+                return
+            }
+            guard outputStateService.applyAndVerify(
+                outputStateService.state(virtualState, supportedBy: rID),
+                to: rID,
+                context: "leaving old EQ hardware"
+            ) else {
+                AppLogger.error("EQEngineService: refusing device switch because old state could not be restored")
+                return
+            }
+        }
+
+        // 2. Increment generation — stale callbacks from old pipeline bail out immediately
         gGeneration.pointee &+= 1
         let gen = gGeneration.pointee
-
-        // 2. Restore old real device volume from virtual device before switching away
-        if let vID = virtualDeviceID, let rID = realDeviceID {
-            let currentVirtualVol = getDeviceVolume(vID)
-            setDeviceVolume(rID, volume: currentVirtualVol)
-            AppLogger.info("EQEngineService: restored old real device volume to \(String(format: "%.0f%%", currentVirtualVol * 100))")
-        }
 
         // 3. Stop old output AUHAL + EQ (but do NOT hide virtual device or change system default)
         let alreadyPoisoned = gRenderStopped.pointee != 0
@@ -612,19 +714,102 @@ final class EQEngineService: ObservableObject {
             return
         }
 
-        // Update state (no setDefaultOutputDevice — virtual device is already default)
+        // Move the new hardware's state into the virtual endpoint, then remove
+        // the physical endpoint's second gain/mute stage.
+        guard let hardwareState = outputStateService.readReliableHardwareState(from: realObjectID) else {
+            AppLogger.error("EQEngineService: could not snapshot new hardware during switch")
+            stopSafe()
+            return
+        }
+        let virtualState = outputStateService.virtualStateRepresentingHardware(hardwareState)
+        guard outputStateService.applyAndVerify(
+            virtualState,
+            to: virtualObjectID,
+            context: "switching virtual state to \(request.virtualDeviceName)"
+        ), outputStateService.applyAndVerify(
+            outputStateService.fullState(matching: hardwareState),
+            to: realObjectID,
+            context: "maxing and unmuting switched EQ hardware"
+        ) else {
+            AppLogger.error("EQEngineService: state handoff failed during switch — using real hardware")
+            abortPipelineAndSelectHardware(uid: request.realDeviceUID, state: hardwareState)
+            return
+        }
+
+        // Commit the new represented endpoint only after its state handoff is
+        // complete. Until here, fallback teardown must still target the old pair.
         self.targetDeviceUID = request.realDeviceUID
         self.virtualDeviceID = virtualObjectID
         self.realDeviceID = realObjectID
         self.pipelineState = .running
-
-        // Volume: read real device's current volume, apply to virtual, then sync
-        syncVolumeForEQ(virtualID: virtualObjectID, realID: realObjectID)
-
+        EQRouteRecoveryStore.save(request.realDeviceUID)
         AppLogger.info("EQEngineService: switch complete")
     }
 
     // MARK: - Stop
+
+    /// Handles changes made outside AudioProfiles (Control Center, System
+    /// Settings, another app). Selecting the hardware currently represented by
+    /// our virtual device gets a state transfer. Selecting any other output is
+    /// respected without copying volume or mute between unrelated devices.
+    private func handleDefaultOutputChanged(to selectedDevice: AudioDevice) {
+        if pipelineState == .stopping,
+           internallyRequestedOutputUIDs.contains(selectedDevice.id) {
+            internallyRequestedOutputUIDs.remove(selectedDevice.id)
+            return
+        }
+
+        guard isRunning,
+              !EQDriverService.shared.isOurVirtualDevice(selectedDevice.id),
+              let currentTargetUID = targetDeviceUID else { return }
+
+        let selectedCurrentHardware = selectedDevice.id == currentTargetUID
+        AppLogger.info(
+            "EQEngineService: external default-output change to '\(selectedDevice.name)' " +
+            "(represented hardware: \(selectedCurrentHardware))"
+        )
+
+        if let virtualID = virtualDeviceID,
+           let realID = realDeviceID {
+            guard let virtualState = outputStateService.readRequiredVirtualState(from: virtualID) else {
+                AppLogger.error("EQEngineService: external switch could not snapshot virtual state")
+                return
+            }
+            guard outputStateService.applyAndVerify(
+                outputStateService.state(virtualState, supportedBy: realID),
+                to: realID,
+                context: "restoring represented hardware after external output change"
+            ) else {
+                // Only reverse the selection when it was the represented
+                // hardware. Never override an unrelated manual choice.
+                if selectedCurrentHardware,
+                   let virtualDevice = EQDriverService.shared.findAudioDevice() {
+                    _ = AudioDeviceControlService().setDefaultOutputDevice(virtualDevice)
+                }
+                return
+            }
+        }
+
+        // The user's selected output is already default. Tear down without
+        // performing another default-device change.
+        gGeneration.pointee &+= 1
+        removeActiveListener()
+        invalidateSafetyTimer()
+        pendingTeardownWork?.cancel()
+        pendingTeardownWork = nil
+        pendingTeardownToken = nil
+        pendingRoutedHardwareState = nil
+        internallyRequestedOutputUIDs.removeAll()
+        stopEngineOnly()
+        EQDriverService.shared.hide()
+        targetDeviceUID = nil
+        virtualDeviceID = nil
+        realDeviceID = nil
+        isRunning = false
+        currentRequest = nil
+        pipelineState = .idle
+        EQRouteRecoveryStore.clear()
+    }
 
     func stopSafe(switchTo realDeviceUID: String) {
         pipelineState = .stopping
@@ -661,20 +846,38 @@ final class EQEngineService: ObservableObject {
     private func teardown(switchTo realDeviceUID: String, synchronous: Bool) {
         AppLogger.info("EQEngineService: stopping, switching back to \(realDeviceUID)")
 
-        // Capture volume before teardown so we can restore it on the real device.
-        let restoreVolume = virtualDeviceID.flatMap { getDeviceVolume($0) }
+        // Restore the virtual endpoint's complete state to the hardware it was
+        // representing. When the destination is another device, that destination
+        // keeps its own state; we never copy one device's volume onto another.
+        var routedHardwareState: AudioOutputState?
+        if let virtualID = virtualDeviceID, let oldRealID = realDeviceID {
+            let hardwareCapabilities = outputStateService.readState(from: oldRealID)
+            routedHardwareState = outputStateService.fullState(matching: hardwareCapabilities)
+            guard let virtualState = outputStateService.readRequiredVirtualState(from: virtualID) else {
+                AppLogger.error("EQEngineService: teardown cancelled because virtual state could not be read")
+                pipelineState = .running
+                return
+            }
+            guard outputStateService.applyAndVerify(
+                outputStateService.state(virtualState, supportedBy: oldRealID),
+                to: oldRealID,
+                context: "stopping EQ and restoring represented hardware"
+            ) else {
+                AppLogger.error("EQEngineService: teardown cancelled because hardware state restore failed")
+                pipelineState = .running
+                return
+            }
+        }
 
-        stopEngineOnly()
-        EQDriverService.shared.hide()
-        targetDeviceUID = nil
-        virtualDeviceID = nil
-        realDeviceID = nil
-        isRunning = false
-        pipelineState = .idle
+        let fallbackUID = targetDeviceUID
+        pendingRoutedHardwareState = routedHardwareState
+        internallyRequestedOutputUIDs = Set([realDeviceUID, fallbackUID].compactMap { $0 })
 
         // Two-step pattern: create var first, then assign closure that captures it.
         // Capture generation so a new start/switch that bumps gGeneration makes this stale.
         let teardownGen = gGeneration.pointee
+        let teardownToken = synchronous ? nil : UUID()
+        pendingTeardownToken = teardownToken
         var work: DispatchWorkItem!
         work = DispatchWorkItem { [self] in
             guard !work.isCancelled else { return }
@@ -682,16 +885,51 @@ final class EQEngineService: ObservableObject {
             let devices = AudioDeviceFactory.getCurrentDevices()
             guard !work.isCancelled else { return }
             guard teardownGen == gGeneration.pointee else { return }
-            if let realDevice = devices.first(where: { $0.id == realDeviceUID && $0.isOutput }) {
-                guard !work.isCancelled else { return }
-                guard teardownGen == gGeneration.pointee else { return }
-                let ok = AudioDeviceControlService().setDefaultOutputDevice(realDevice)
-                AppLogger.info("EQEngineService: restored default output to '\(realDevice.name)' → \(ok)")
-                guard !work.isCancelled else { return }
-                guard teardownGen == gGeneration.pointee else { return }
-                if let vol = restoreVolume, let realID = translateUID(realDeviceUID) {
-                    setDeviceVolume(realID, volume: vol)
-                    AppLogger.info("EQEngineService: restored volume to \(String(format: "%.0f%%", vol * 100))")
+            let requestedDevice = devices.first { $0.id == realDeviceUID && $0.isOutput }
+            let fallbackDevice = fallbackUID.flatMap { uid in
+                devices.first { $0.id == uid && $0.isOutput }
+            }
+            let destination = requestedDevice ?? fallbackDevice
+
+            guard let destination else {
+                if synchronous {
+                    finishDefaultSwitch(
+                        succeeded: false,
+                        generation: teardownGen,
+                        token: teardownToken,
+                        routedHardwareState: routedHardwareState
+                    )
+                } else {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.finishDefaultSwitch(
+                            succeeded: false,
+                            generation: teardownGen,
+                            token: teardownToken,
+                            routedHardwareState: routedHardwareState
+                        )
+                    }
+                }
+                return
+            }
+
+            guard !work.isCancelled, teardownGen == gGeneration.pointee else { return }
+            let switched = AudioDeviceControlService().setDefaultOutputDevice(destination)
+            AppLogger.info("EQEngineService: restored default output to '\(destination.name)' → \(switched)")
+            if synchronous {
+                finishDefaultSwitch(
+                    succeeded: switched,
+                    generation: teardownGen,
+                    token: teardownToken,
+                    routedHardwareState: routedHardwareState
+                )
+            } else {
+                DispatchQueue.main.async { [weak self] in
+                    self?.finishDefaultSwitch(
+                        succeeded: switched,
+                        generation: teardownGen,
+                        token: teardownToken,
+                        routedHardwareState: routedHardwareState
+                    )
                 }
             }
         }
@@ -704,6 +942,94 @@ final class EQEngineService: ObservableObject {
             pendingTeardownWork = work
             DispatchQueue.global(qos: .userInitiated).async(execute: work)
         }
+    }
+
+    /// Completes teardown only after Core Audio confirms the hardware is the
+    /// default. On failure the still-running virtual route is restored to its
+    /// required 100%/unmuted hardware state, preventing a silent orphan.
+    private func finishDefaultSwitch(
+        succeeded: Bool,
+        generation: Int32,
+        token: UUID?,
+        routedHardwareState: AudioOutputState?
+    ) {
+        guard generation == gGeneration.pointee else { return }
+        if let token, pendingTeardownToken != token { return }
+        pendingTeardownWork = nil
+        pendingTeardownToken = nil
+        pendingRoutedHardwareState = nil
+        internallyRequestedOutputUIDs.removeAll()
+
+        guard succeeded else {
+            if let realID = realDeviceID, let routedHardwareState {
+                _ = outputStateService.applyAndVerify(
+                    routedHardwareState,
+                    to: realID,
+                    context: "rolling back failed default-output switch"
+                )
+            }
+            pipelineState = .running
+            AppLogger.error("EQEngineService: default-output switch failed; virtual route kept alive")
+            return
+        }
+
+        stopEngineOnly()
+        targetDeviceUID = nil
+        virtualDeviceID = nil
+        realDeviceID = nil
+        isRunning = false
+        currentRequest = nil
+        pipelineState = .idle
+        EQDriverService.shared.hide()
+        EQRouteRecoveryStore.clear()
+    }
+
+    /// Last-resort path for a failed hot-swap. It preserves the selected
+    /// hardware's own state and never copies state from another endpoint.
+    private func abortPipelineAndSelectHardware(uid: String, state: AudioOutputState) {
+        guard let realID = translateUID(uid) else {
+            AppLogger.error("EQEngineService: cannot resolve fallback hardware \(uid)")
+            return
+        }
+        _ = outputStateService.applyAndVerify(
+            state,
+            to: realID,
+            context: "aborting failed EQ switch"
+        )
+
+        guard let device = AudioDeviceFactory.createAudioDevice(from: realID),
+              AudioDeviceControlService().setDefaultOutputDevice(device) else {
+            // Keep the virtual route alive when Core Audio refuses the default
+            // switch, and put its hardware stage back into routed form.
+            if let virtualID = virtualDeviceID {
+                _ = outputStateService.applyAndVerify(
+                    outputStateService.virtualStateRepresentingHardware(state),
+                    to: virtualID,
+                    context: "restoring virtual state after failed EQ-switch fallback"
+                )
+            }
+            _ = outputStateService.applyAndVerify(
+                outputStateService.fullState(matching: state),
+                to: realID,
+                context: "rolling back failed EQ-switch fallback"
+            )
+            targetDeviceUID = uid
+            realDeviceID = realID
+            isRunning = true
+            pipelineState = .running
+            EQRouteRecoveryStore.save(uid)
+            return
+        }
+
+        stopEngineOnly()
+        targetDeviceUID = nil
+        virtualDeviceID = nil
+        realDeviceID = nil
+        isRunning = false
+        currentRequest = nil
+        pipelineState = .idle
+        EQDriverService.shared.hide()
+        EQRouteRecoveryStore.clear()
     }
 
     // MARK: - Live EQ update
@@ -763,43 +1089,6 @@ final class EQEngineService: ObservableObject {
         // The generation counter ensures stale callbacks return immediately.
         // They will be replaced when the next start() creates new ones,
         // and the old ones will be deallocated naturally by ARC at that point.
-    }
-
-    // MARK: - Private: Volume Sync
-
-    /// Set up volume for EQ mode: copy real device volume to virtual device,
-    /// then max out the real device. The driver applies volume scaling in its
-    /// WriteMix path (ioGain = volumeScalar), so the audio in shared memory
-    /// is already volume-adjusted — no listener needed.
-    private func syncVolumeForEQ(virtualID: AudioObjectID, realID: AudioObjectID) {
-        let realVolume = getDeviceVolume(realID)
-        setDeviceVolume(virtualID, volume: realVolume)
-        setDeviceVolume(realID, volume: 1.0)
-
-        AppLogger.info("EQEngineService: volume synced (virtual=\(String(format: "%.0f%%", realVolume * 100)), real=100%)")
-    }
-
-    private func getDeviceVolume(_ deviceID: AudioObjectID) -> Float32 {
-        var addr = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwareServiceDeviceProperty_VirtualMainVolume,
-            mScope: kAudioDevicePropertyScopeOutput,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var volume: Float32 = 1.0
-        var size = UInt32(MemoryLayout<Float32>.size)
-        AudioObjectGetPropertyData(deviceID, &addr, 0, nil, &size, &volume)
-        return volume
-    }
-
-    private func setDeviceVolume(_ deviceID: AudioObjectID, volume: Float32) {
-        var addr = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwareServiceDeviceProperty_VirtualMainVolume,
-            mScope: kAudioDevicePropertyScopeOutput,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var vol = volume
-        AudioObjectSetPropertyData(deviceID, &addr, 0, nil,
-                                    UInt32(MemoryLayout<Float32>.size), &vol)
     }
 
     // MARK: - Private: Create Audio Units

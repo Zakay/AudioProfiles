@@ -11,6 +11,7 @@ import Foundation
 final class AudioPipelineService {
 
     private let deviceControlService: AudioDeviceControlServiceProtocol = AudioDeviceControlService()
+    private let outputStateService = AudioOutputStateService()
 
     // MARK: - Apply Pipeline
 
@@ -98,12 +99,39 @@ final class AudioPipelineService {
         let currentDefault = deviceControlService.getDefaultOutputDevice()
         guard let current = currentDefault, EQDriverService.shared.isOurVirtualDevice(current.id) else { return }
 
-        AppLogger.info("AudioPipelineService: orphan recovery — virtual device is system default but EQ not running")
+        guard let realDevice = intendedOutputDevice else {
+            // At early launch we do not yet know which physical output the
+            // profile will resolve. Hiding the default virtual device here
+            // makes Core Audio choose an arbitrary fallback and loses state.
+            AppLogger.info("AudioPipelineService: orphan recovery deferred until real output is resolved")
+            return
+        }
 
-        if let realDevice = intendedOutputDevice {
-            _ = deviceControlService.setDefaultOutputDevice(realDevice)
+        AppLogger.info("AudioPipelineService: recovering orphaned virtual output to '\(realDevice.name)'")
+
+        guard let virtualID = outputStateService.resolveDeviceID(forUID: current.id),
+              let realID = outputStateService.resolveDeviceID(forUID: realDevice.id),
+              let virtualState = outputStateService.readRequiredVirtualState(from: virtualID) else {
+            AppLogger.error("AudioPipelineService: orphan recovery could not read endpoint state")
+            return
+        }
+
+        let destinationState = outputStateService.state(virtualState, supportedBy: realID)
+        guard outputStateService.applyAndVerify(
+            destinationState,
+            to: realID,
+            context: "recovering orphaned virtual output"
+        ) else {
+            AppLogger.error("AudioPipelineService: orphan recovery state transfer failed")
+            return
+        }
+
+        guard deviceControlService.setDefaultOutputDevice(realDevice) else {
+            AppLogger.error("AudioPipelineService: orphan recovery could not select real output")
+            return
         }
         EQDriverService.shared.hide()
+        EQRouteRecoveryStore.clear()
     }
 
     /// Public entry point for early orphan recovery at app startup.

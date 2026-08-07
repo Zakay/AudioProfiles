@@ -124,9 +124,8 @@ class ProfileManager: ObservableObject {
             }
         }
 
-        // Early orphan recovery: if the app crashed with our virtual device as
-        // system default, switch back immediately so the user has audio.
-        // This runs before trigger detection to minimize silent-output time.
+        // Detect an orphan early. Recovery is deferred until evaluation has
+        // resolved the physical endpoint, so mute/volume can be migrated safely.
         DispatchQueue.main.async {
             AudioPipelineService().recoverOrphanIfNeeded()
         }
@@ -165,12 +164,16 @@ class ProfileManager: ObservableObject {
             self.periodicCleanup()
         }
 
-        // After coreaudiod restarts, all devices reset — run the full trigger flow
+        // After coreaudiod restarts, all devices reset. Force a new pipeline
+        // evaluation even when the active profile itself did not change.
         AudioDeviceMonitor.shared.serviceRestartedSubject
-            .debounce(for: .seconds(1), scheduler: RunLoop.main)
-            .sink { _ in
+            .debounce(for: .milliseconds(2500), scheduler: RunLoop.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
                 AppLogger.info("coreaudiod restarted — running full trigger detection flow")
                 ProfileTriggerService.shared.triggerAutoDetection()
+                self.lastFingerprint = nil
+                self.evaluateAndApply()
             }
             .store(in: &cancellables)
     }
@@ -221,13 +224,10 @@ class ProfileManager: ObservableObject {
     }
 
     private func performEvaluation() {
-        // 1. Cancel any pending teardown
-        EQEngineService.shared.cancelPendingTeardown()
-
-        // 2. Guard activeProfile exists
+        // 1. Guard activeProfile exists
         guard let profile = activeProfile else { return }
 
-        // 3. Get current devices
+        // 2. Get current devices
         let devices = AudioDeviceFactory.getCurrentDevices()
 
         // 4. Resolve output device from priority list (with virtual device look-through)
@@ -258,9 +258,22 @@ class ProfileManager: ObservableObject {
                 if EQEngineService.shared.isRunning, let realUID = EQEngineService.shared.targetDeviceUID {
                     currentDevice = devices.first { $0.id == realUID && $0.isOutput }
                 } else {
-                    // Orphan — will be cleaned up by pipeline service
-                    EQDriverService.shared.hide()
-                    currentDevice = pipelineService.getDefaultOutputDevice()
+                    // Orphan: resolve the previously represented physical
+                    // endpoint. The pipeline service will transfer state before
+                    // selecting it and only then hide the virtual driver.
+                    if let savedUID = EQRouteRecoveryStore.representedDeviceUID {
+                        currentDevice = devices.first {
+                            $0.id == savedUID && $0.isOutput &&
+                            !EQDriverService.shared.isOurVirtualDevice($0.id)
+                        }
+                    }
+                    if currentDevice == nil || currentDevice.map({
+                        EQDriverService.shared.isOurVirtualDevice($0.id)
+                    }) == true {
+                        currentDevice = devices.first {
+                            $0.isOutput && !EQDriverService.shared.isOurVirtualDevice($0.id)
+                        }
+                    }
                 }
             }
             resolvedOutputDevice = currentDevice
@@ -314,6 +327,10 @@ class ProfileManager: ObservableObject {
         if fingerprint == lastFingerprint {
             return
         }
+
+        // The desired state really changed, so a pending stop must not race
+        // with the new route. An unchanged evaluation leaves that stop alone.
+        EQEngineService.shared.cancelPendingTeardown()
         lastFingerprint = fingerprint
 
         // 9. Build virtual device name

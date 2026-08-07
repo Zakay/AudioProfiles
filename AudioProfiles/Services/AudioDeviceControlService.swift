@@ -3,6 +3,8 @@ import CoreAudio
 
 /// Handles setting audio devices as default system input/output
 class AudioDeviceControlService: AudioDeviceControlServiceProtocol {
+    private let verificationAttempts = 30
+    private let verificationDelay: TimeInterval = 0.01
     
     /// Set device as default output
     /// - Parameter device: AudioDevice to set as default output
@@ -64,8 +66,17 @@ class AudioDeviceControlService: AudioDeviceControlServiceProtocol {
         )
         
         if status == noErr {
-            AppLogger.info("Set default \(deviceType) device to: \(device.name)")
-            return true
+            for attempt in 0..<verificationAttempts {
+                if getDefaultDeviceObjectID(isInput: isInput) == audioObjectID {
+                    AppLogger.info("Set and verified default \(deviceType) device: \(device.name)")
+                    return true
+                }
+                if attempt + 1 < verificationAttempts {
+                    Thread.sleep(forTimeInterval: verificationDelay)
+                }
+            }
+            AppLogger.error("Default \(deviceType) did not become active: \(device.name)")
+            return false
         } else {
             AppLogger.error("Failed to set default \(deviceType) device: \(status)")
             return false
@@ -76,6 +87,11 @@ class AudioDeviceControlService: AudioDeviceControlServiceProtocol {
     /// - Parameter isInput: Whether to get input (true) or output (false) device
     /// - Returns: Currently set default device
     private func getDefaultDevice(isInput: Bool) -> AudioDevice? {
+        guard let deviceID = getDefaultDeviceObjectID(isInput: isInput) else { return nil }
+        return AudioDeviceFactory.createAudioDevice(from: deviceID)
+    }
+
+    private func getDefaultDeviceObjectID(isInput: Bool) -> AudioObjectID? {
         let selector = isInput ? kAudioHardwarePropertyDefaultInputDevice : kAudioHardwarePropertyDefaultOutputDevice
         
         var propertyAddress = AudioObjectPropertyAddress(
@@ -101,7 +117,7 @@ class AudioDeviceControlService: AudioDeviceControlServiceProtocol {
             return nil
         }
         
-        return AudioDeviceFactory.createAudioDevice(from: deviceID)
+        return deviceID
     }
     
     /// Convert device UID back to AudioObjectID for Core Audio operations
@@ -206,4 +222,4 @@ class AudioDeviceControlService: AudioDeviceControlServiceProtocol {
         
         return status == noErr
     }
-} 
+}

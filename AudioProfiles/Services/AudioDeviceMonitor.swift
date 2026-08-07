@@ -10,6 +10,10 @@ class AudioDeviceMonitor: ObservableObject {
     /// Published when device list changes (connect/disconnect events)
     let deviceChangesSubject = PassthroughSubject<[AudioDevice], Never>()
 
+    /// Published whenever macOS changes the default output, including changes
+    /// made manually in Control Center or System Settings.
+    let defaultOutputChangesSubject = PassthroughSubject<AudioDevice, Never>()
+
     /// Published when coreaudiod restarts — subscribers should tear down hardware-bound state
     let serviceRestartedSubject = PassthroughSubject<Void, Never>()
 
@@ -24,6 +28,16 @@ class AudioDeviceMonitor: ObservableObject {
         mScope: kAudioObjectPropertyScopeGlobal,
         mElement: kAudioObjectPropertyElementMain
     )
+
+    private var defaultOutputAddress = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+
+    private var deviceListenerBlock: AudioObjectPropertyListenerBlock?
+    private var restartListenerBlock: AudioObjectPropertyListenerBlock?
+    private var defaultOutputListenerBlock: AudioObjectPropertyListenerBlock?
 
     /// Background queue for Core Audio callbacks and queries.
     /// Keeps the main thread free even if Core Audio calls block during coreaudiod restart.
@@ -41,6 +55,7 @@ class AudioDeviceMonitor: ObservableObject {
     private init() {
         setupServiceRestartMonitoring()
         setupDeviceMonitoring()
+        setupDefaultOutputMonitoring()
 
         // Query current devices on background queue to avoid blocking main thread
         // if coreaudiod is slow/restarting. Publishes the initial device list through
@@ -58,41 +73,84 @@ class AudioDeviceMonitor: ObservableObject {
 
     private func setupDeviceMonitoring() {
         // Listener fires on audioQueue — Core Audio queries won't block main
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.scheduleDeviceQuery()
+        }
+        deviceListenerBlock = block
         AudioObjectAddPropertyListenerBlock(
             AudioObjectID(kAudioObjectSystemObject),
             &propertyAddress,
-            audioQueue
-        ) { [weak self] _, _ in
-            self?.scheduleDeviceQuery()
-        }
+            audioQueue,
+            block
+        )
     }
 
     private func setupServiceRestartMonitoring() {
         // Restart listener also on audioQueue so it isn't blocked by a hanging device query
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.handleServiceRestart()
+        }
+        restartListenerBlock = block
         AudioObjectAddPropertyListenerBlock(
             AudioObjectID(kAudioObjectSystemObject),
             &restartAddress,
-            audioQueue
-        ) { [weak self] _, _ in
+            audioQueue,
+            block
+        )
+    }
+
+    private func setupDefaultOutputMonitoring() {
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.handleDefaultOutputChange()
+        }
+        defaultOutputListenerBlock = block
+        AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject),
+            &defaultOutputAddress,
+            audioQueue,
+            block
+        )
+    }
+
+    private func handleServiceRestart() {
+        AppLogger.info("coreaudiod service restarted — suppressing queries for stabilization")
+        isRestarting = true
+        debounceWork?.cancel()
+        lastKnownDeviceIDs = []
+
+        DispatchQueue.main.async { [weak self] in
+            self?.serviceRestartedSubject.send()
+        }
+
+        // After coreaudiod restart, wait for the system to stabilize before querying.
+        // Devices register one by one; querying too early gets partial/hanging results.
+        let stabilizeWork = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
-            AppLogger.info("coreaudiod service restarted — suppressing queries for stabilization")
-            self.isRestarting = true
-            self.debounceWork?.cancel()
-            self.lastKnownDeviceIDs = []
+            self.isRestarting = false
+            AppLogger.info("coreaudiod stabilization period ended — querying devices")
+            self.handleDeviceListChange()
+        }
+        audioQueue.asyncAfter(deadline: .now() + 2.0, execute: stabilizeWork)
+    }
 
-            DispatchQueue.main.async {
-                self.serviceRestartedSubject.send()
-            }
+    private func handleDefaultOutputChange() {
+        guard !isRestarting else { return }
 
-            // After coreaudiod restart, wait for the system to stabilize before querying.
-            // Devices register one by one; querying too early gets partial/hanging results.
-            let stabilizeWork = DispatchWorkItem { [weak self] in
-                guard let self = self else { return }
-                self.isRestarting = false
-                AppLogger.info("coreaudiod stabilization period ended — querying devices")
-                self.handleDeviceListChange()
-            }
-            self.audioQueue.asyncAfter(deadline: .now() + 2.0, execute: stabilizeWork)
+        var address = defaultOutputAddress
+        var deviceID: AudioObjectID = 0
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        guard AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            0,
+            nil,
+            &size,
+            &deviceID
+        ) == noErr,
+        let device = AudioDeviceFactory.createAudioDevice(from: deviceID) else { return }
+
+        DispatchQueue.main.async { [weak self] in
+            self?.defaultOutputChangesSubject.send(device)
         }
     }
 
@@ -137,15 +195,20 @@ class AudioDeviceMonitor: ObservableObject {
     }
 
     deinit {
-        AudioObjectRemovePropertyListenerBlock(
-            AudioObjectID(kAudioObjectSystemObject),
-            &propertyAddress,
-            audioQueue
-        ) { _, _ in }
-        AudioObjectRemovePropertyListenerBlock(
-            AudioObjectID(kAudioObjectSystemObject),
-            &restartAddress,
-            audioQueue
-        ) { _, _ in }
+        if let block = deviceListenerBlock {
+            AudioObjectRemovePropertyListenerBlock(
+                AudioObjectID(kAudioObjectSystemObject), &propertyAddress, audioQueue, block
+            )
+        }
+        if let block = restartListenerBlock {
+            AudioObjectRemovePropertyListenerBlock(
+                AudioObjectID(kAudioObjectSystemObject), &restartAddress, audioQueue, block
+            )
+        }
+        if let block = defaultOutputListenerBlock {
+            AudioObjectRemovePropertyListenerBlock(
+                AudioObjectID(kAudioObjectSystemObject), &defaultOutputAddress, audioQueue, block
+            )
+        }
     }
 }
