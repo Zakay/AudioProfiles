@@ -307,7 +307,7 @@ class ProfileManager: ObservableObject {
         var effectiveEQ = EQSettings.combine(base: baseEQ, overlay: overlay)
 
         // 6b. Bypass check — flatten EQ when global bypass or per-device bypass is active
-        if isProcessingBypassed {
+        if isProcessingBypassed || EQStore.shared.isBypassed(for: outputUID) {
             effectiveEQ = .flat
         }
 
