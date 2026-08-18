@@ -27,8 +27,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     Task { @MainActor in
       // EQEngineService must be initialized first so its Combine subscriptions are active
       _ = EQEngineService.shared
-      // Then start content mode detection
+      // Then start content mode detection (resume if it was enabled before restart)
       _ = ContentModeDetectionService.shared
+      if SoundModesStore.shared.isEnabled {
+        ContentModeDetectionService.shared.startDetection()
+      }
       _ = NightModeScheduler.shared
       NSLog("[AudioProfiles] All services initialized, soundModesEnabled=\(SoundModesStore.shared.isEnabled)")
     }
