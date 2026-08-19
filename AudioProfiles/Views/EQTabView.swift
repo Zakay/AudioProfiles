@@ -79,15 +79,27 @@ struct EQTabView: View {
                 Spacer()
 
                 if let id = vm.selectedDeviceID, eqStore.activeEQ(for: id) != nil {
-                    Text("EQ Active")
+                    Text(isBypassed ? "Bypassed" : "EQ Active")
                         .font(.caption2)
                         .fontWeight(.medium)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 3)
-                        .background(Color.blue.opacity(0.15))
-                        .foregroundColor(.blue)
+                        .background((isBypassed ? Color.orange : Color.blue).opacity(0.15))
+                        .foregroundColor(isBypassed ? .orange : .blue)
                         .clipShape(Capsule())
                 }
+
+                Button {
+                    guard let id = vm.selectedDeviceID else { return }
+                    eqStore.toggleBypass(for: id)
+                } label: {
+                    Text("Bypass").font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .tint(isBypassed ? .orange : nil)
+                .disabled(vm.selectedDeviceID == nil || profileManager.isProcessingBypassed)
+                .help("Bypass EQ for this device only, keeping your settings. Disabled while the master toggle is off.")
 
                 Button {
                     guard let id = vm.selectedDeviceID else { return }
