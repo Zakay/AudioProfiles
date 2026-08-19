@@ -150,77 +150,7 @@ class AudioDeviceHistoryService: ObservableObject {
     }
     
     // MARK: - Private Methods
-    
-    /// Update existing device entries to mark inactive devices
-    /// - Parameters:
-    ///   - deviceHistory: Current device history to update
-    ///   - currentDeviceIDs: Set of currently active device IDs
-    ///   - timestamp: Current timestamp to use for updates
-    /// - Returns: Updated device history with status changes
-    private func updateExistingEntries(
-        _ deviceHistory: [String: DeviceHistoryEntry],
-        currentDeviceIDs: Set<String>,
-        timestamp: Date
-    ) -> [String: DeviceHistoryEntry] {
-        
-        var updatedHistory = deviceHistory
-        
-        // Update existing entries - mark as inactive if not currently present
-        for (deviceID, entry) in deviceHistory {
-            let isCurrentlyActive = currentDeviceIDs.contains(deviceID)
-            // connectedAt advances only on a disconnected → connected transition;
-            // otherwise it is preserved so unrelated device events don't refresh it.
-            let connectedAt = (isCurrentlyActive && !entry.isCurrentlyActive) ? timestamp : entry.connectedAt
-            updatedHistory[deviceID] = DeviceHistoryEntry(
-                device: entry.device,
-                lastSeen: isCurrentlyActive ? timestamp : entry.lastSeen,
-                connectedAt: connectedAt,
-                isCurrentlyActive: isCurrentlyActive
-            )
-        }
-        
-        return updatedHistory
-    }
-    
-    /// Add new devices to history or update existing ones with current data
-    /// - Parameters:
-    ///   - deviceHistory: Current device history to update
-    ///   - devices: Currently active devices to add/update
-    ///   - timestamp: Current timestamp to use for new entries
-    /// - Returns: Updated device history with new/updated devices
-    private func addOrUpdateDevices(
-        _ deviceHistory: [String: DeviceHistoryEntry],
-        devices: [AudioDevice],
-        timestamp: Date
-    ) -> [String: DeviceHistoryEntry] {
-        
-        var updatedHistory = deviceHistory
-        
-        // Add new devices to history
-        for device in devices {
-            if let existing = updatedHistory[device.id] {
-                // Already reconciled by updateExistingEntries (which handled any
-                // reconnect transition) — preserve its connectedAt, refresh the rest.
-                updatedHistory[device.id] = DeviceHistoryEntry(
-                    device: device, // Use the current device data (might have updated properties)
-                    lastSeen: timestamp,
-                    connectedAt: existing.connectedAt,
-                    isCurrentlyActive: true
-                )
-            } else {
-                // Completely new device — its first appearance is its connection time
-                updatedHistory[device.id] = DeviceHistoryEntry(
-                    device: device,
-                    lastSeen: timestamp,
-                    connectedAt: timestamp,
-                    isCurrentlyActive: true
-                )
-            }
-        }
-        
-        return updatedHistory
-    }
-    
+
     /// Complete update process for device history
     /// - Parameters:
     ///   - deviceHistory: Current device history
@@ -232,24 +162,8 @@ class AudioDeviceHistoryService: ObservableObject {
         with devices: [AudioDevice],
         timestamp: Date = Date()
     ) -> [String: DeviceHistoryEntry] {
-        
-        let currentDeviceIDs = Set(devices.map { $0.id })
-        
-        // Step 1: Update existing entries
-        let historyWithUpdatedStatus = updateExistingEntries(
-            deviceHistory,
-            currentDeviceIDs: currentDeviceIDs,
-            timestamp: timestamp
-        )
-        
-        // Step 2: Add or update devices
-        let finalHistory = addOrUpdateDevices(
-            historyWithUpdatedStatus,
-            devices: devices,
-            timestamp: timestamp
-        )
-        
-        return finalHistory
+        // connectedAt/lastSeen bookkeeping lives in AudioCore (shared with tests).
+        return AudioCore.updateDeviceHistory(deviceHistory, with: devices, now: timestamp)
     }
     
     private func loadDeviceHistory() {

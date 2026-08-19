@@ -403,9 +403,37 @@ run_tests() {
         local test_name
         test_name=$(basename "$test_file")
         print_status "  Running ${test_name}..."
-        if ! swift "$test_file" 2>&1 | tail -5; then
-            print_error "  ${test_name} FAILED"
-            any_failed=true
+
+        # A test may opt in to compiling against the REAL production sources instead of
+        # reimplementing them, via a "// SHARED: <repo-relative paths...>" directive near
+        # the top of the file. Those files are Foundation-only (Models/ + Core/), so the
+        # test exercises the same code the app ships — no drift. Compiled with swiftc
+        # (the test file is staged as main.swift, the only unit with top-level code).
+        local shared_line
+        shared_line=$(grep -m1 -E '^// SHARED:' "$test_file" || true)
+
+        if [[ -n "$shared_line" ]]; then
+            local shared_paths=()
+            local rel
+            for rel in ${shared_line#// SHARED:}; do
+                shared_paths+=("${WORK_DIR}/${rel}")
+            done
+            local build_tmp
+            build_tmp=$(mktemp -d)
+            cp "$test_file" "${build_tmp}/main.swift"
+            if ! swiftc "${shared_paths[@]}" "${build_tmp}/main.swift" -o "${build_tmp}/test_bin" 2>&1 | tail -8; then
+                print_error "  ${test_name} FAILED (compile)"
+                any_failed=true
+            elif ! "${build_tmp}/test_bin" 2>&1 | tail -5; then
+                print_error "  ${test_name} FAILED"
+                any_failed=true
+            fi
+            rm -rf "$build_tmp"
+        else
+            if ! swift "$test_file" 2>&1 | tail -5; then
+                print_error "  ${test_name} FAILED"
+                any_failed=true
+            fi
         fi
     done
 

@@ -382,29 +382,16 @@ class ProfileManager: ObservableObject {
     /// Check if a trigger should be applied based on device connection timestamps
     /// Returns true if the trigger device was connected after the last manual switch
     func shouldApplyTrigger(forDeviceIDs triggerDeviceIDs: [String]) -> Bool {
-        // Always allow triggers if no manual switch has occurred
-        guard let lastManualSwitch = lastManualSwitchTimestamp else {
-            return true
-        }
-
-        // Check if any trigger device was connected after the manual switch
-        let deviceHistoryService = AudioDeviceHistoryService.shared
-
-        for deviceID in triggerDeviceIDs {
-            if let deviceEntry = deviceHistoryService.deviceHistory[deviceID],
-               deviceEntry.isCurrentlyActive,
-               deviceEntry.connectedAt > lastManualSwitch {
-                // This trigger device was connected after manual switch - allow trigger
-                // (connectedAt, not lastSeen — so an unrelated device event that merely
-                //  refreshes lastSeen cannot resurrect an old trigger and override the user)
-                AppLogger.info("Trigger device '\(deviceEntry.device.name)' connected after manual switch - allowing auto-switch")
-                return true
-            }
-        }
-
-        // All trigger devices were connected before the manual switch - block trigger
-        AppLogger.info("All trigger devices were connected before manual switch - blocking auto-switch")
-        return false
+        // Manual-override rule (connectedAt > lastManualSwitch) lives in AudioCore (shared with tests).
+        let allowed = AudioCore.shouldApplyTrigger(
+            lastManualSwitch: lastManualSwitchTimestamp,
+            triggerDeviceIDs: triggerDeviceIDs,
+            history: AudioDeviceHistoryService.shared.deviceHistory
+        )
+        AppLogger.info(allowed
+            ? "Trigger allowed — a trigger device connected after the manual switch (or no manual override active)"
+            : "Trigger blocked — all trigger devices predate the manual switch")
+        return allowed
     }
 
     // MARK: - Profile Management API

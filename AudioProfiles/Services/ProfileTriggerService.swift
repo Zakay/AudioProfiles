@@ -117,58 +117,19 @@ class ProfileTriggerService {
     ///   - currentDevices: Full device list (needed for transport type matching)
     /// - Returns: Best matching profile with match details, or nil if no matches
     private func findBestMatch(from profiles: [Profile], currentDeviceIDs: Set<String>, currentDevices: [AudioDevice] = []) -> MatchResult? {
-        var bestMatch: MatchResult? = nil
-        var bestSpecificCount = 0
-
-        for profile in profiles {
-            guard !profile.triggerRules.isEmpty else { continue }
-
-            var matchCount = 0
-            var specificCount = 0
-            var primaryDevice: String? = nil
-
-            for rule in profile.triggerRules {
-                switch rule {
-                case .specificDevice(let id):
-                    if currentDeviceIDs.contains(id) {
-                        matchCount += 1
-                        specificCount += 1
-                        if primaryDevice == nil { primaryDevice = id }
-                    }
-                case .transportType(let type):
-                    if currentDevices.contains(where: { $0.transportType == type }) {
-                        matchCount += 1
-                        if primaryDevice == nil {
-                            primaryDevice = currentDevices.first(where: { $0.transportType == type })?.id ?? "Any \(type)"
-                        }
-                    }
-                }
-            }
-
-            if matchCount > 0 {
-                let isBetter: Bool
-                if bestMatch == nil {
-                    isBetter = true
-                } else if matchCount > bestMatch!.matchCount {
-                    isBetter = true
-                } else if matchCount == bestMatch!.matchCount && specificCount > bestSpecificCount {
-                    isBetter = true  // Tie-break: prefer more specific matches
-                } else {
-                    isBetter = false
-                }
-
-                if isBetter {
-                    bestMatch = MatchResult(
-                        profile: profile,
-                        matchCount: matchCount,
-                        primaryTriggerDevice: primaryDevice!
-                    )
-                    bestSpecificCount = specificCount
-                }
-            }
+        // Matching + tie-break logic lives in AudioCore (shared with tests).
+        guard let match = AudioCore.findBestTriggerMatch(
+            profiles: profiles,
+            currentDeviceIDs: currentDeviceIDs,
+            currentDevices: currentDevices
+        ), let profile = profiles.first(where: { $0.id == match.profileID }) else {
+            return nil
         }
-
-        return bestMatch
+        return MatchResult(
+            profile: profile,
+            matchCount: match.matchCount,
+            primaryTriggerDevice: match.primaryTriggerDevice
+        )
     }
     
     // MARK: - Profile Coordination

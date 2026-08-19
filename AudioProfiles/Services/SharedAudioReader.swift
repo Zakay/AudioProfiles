@@ -151,31 +151,26 @@ final class SharedAudioReader {
         let writeIdx = header.pointee.writeIndex
         OSMemoryBarrier()
 
-        // How many frames are available?
-        // If writeIdx < readIndex, the driver reset (IO stopped/restarted) — resync.
-        var available: Int
-        if writeIdx >= readIndex {
-            available = Int(writeIdx - readIndex)
-        } else {
+        // Ring-buffer read arithmetic lives in AudioCore (shared with tests).
+        let plan = AudioCore.computeReadPlan(
+            writeIndex: writeIdx,
+            readIndex: readIndex,
+            frameCapacity: frameCapacity,
+            requestedFrames: requestedFrames
+        )
+        if plan.didReset {
             AppLogger.warning("SharedAudioReader: driver reset detected (writeIdx \(writeIdx) < readIndex \(readIndex)) — resyncing, possible audio glitch")
-            readIndex = writeIdx
-            available = 0
         }
-
-        // If we've fallen behind by more than the ring capacity, resync
-        // (the oldest data has been overwritten)
-        if available > frameCapacity {
-            AppLogger.warning("SharedAudioReader: fell behind by \(available) frames (capacity \(frameCapacity)) — resyncing, dropped \(available - frameCapacity) frames")
-            readIndex = writeIdx - UInt64(frameCapacity)
-            available = frameCapacity
+        if plan.framesDropped > 0 {
+            AppLogger.warning("SharedAudioReader: fell behind by \(plan.available) frames (capacity \(frameCapacity)) — resyncing, dropped \(plan.framesDropped) frames")
         }
-
-        // Don't read more than what's available or what's in the ring
-        let framesToRead = min(min(available, requestedFrames), frameCapacity)
+        let framesToRead = plan.framesToRead
 
         if framesToRead > 0 {
             let cap = frameCapacity * channels
-            let startOffset = Int(readIndex % UInt64(frameCapacity)) * channels
+            // Read from where the plan says the pre-advance cursor is.
+            let readStart = plan.newReadIndex - UInt64(framesToRead)
+            let startOffset = Int(readStart % UInt64(frameCapacity)) * channels
 
             // Read interleaved data and deinterleave into the ABL
             for ch in 0..<min(channels, ablBufs.count) {
@@ -193,8 +188,6 @@ final class SharedAudioReader {
                 }
                 ablBufs[ch].mDataByteSize = frameCount * 4
             }
-
-            readIndex &+= UInt64(framesToRead)
         } else {
             // No data available — output silence
             for ch in 0..<ablBufs.count {
@@ -203,6 +196,9 @@ final class SharedAudioReader {
                 ablBufs[ch].mDataByteSize = frameCount * 4
             }
         }
+
+        // Advance (or resync) the read cursor exactly as the plan dictates.
+        readIndex = plan.newReadIndex
     }
 
     // MARK: - Diagnostics

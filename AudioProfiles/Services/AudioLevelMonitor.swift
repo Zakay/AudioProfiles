@@ -105,28 +105,19 @@ final class AudioLevelMonitor: ObservableObject {
         let samplesPtr = region.advanced(by: kHeaderSize).assumingMemoryBound(to: Float32.self)
         let totalSamples = frameCapacity * channels
 
-        // Read last 1024 frames (or fewer if capacity is smaller)
-        let framesToRead = min(1024, frameCapacity)
-        let writeFrame = Int(writeIndex % UInt64(frameCapacity))
-
-        var sumL: Float = 0
-        var sumR: Float = 0
-
-        for i in 0..<framesToRead {
-            let frameIdx = (writeFrame - framesToRead + i + frameCapacity) % frameCapacity
-            let sampleIdx = frameIdx * channels
-            guard sampleIdx + 1 < totalSamples else { continue }
-            let l = samplesPtr[sampleIdx]
-            let r = samplesPtr[sampleIdx + 1]
-            sumL += l * l
-            sumR += r * r
-        }
-
-        let rmsL = sqrtf(sumL / Float(framesToRead))
-        let rmsR = sqrtf(sumR / Float(framesToRead))
-
-        // Smooth with simple low-pass filter for visual appeal
-        leftLevel = leftLevel * 0.7 + min(rmsL, 1.0) * 0.3
-        rightLevel = rightLevel * 0.7 + min(rmsR, 1.0) * 0.3
+        // Windowed RMS + smoothing arithmetic lives in AudioCore (shared with tests).
+        let (l, r) = AudioCore.computeRMSLevels(
+            sampleAt: { samplesPtr[$0] },
+            totalSamples: totalSamples,
+            channels: channels,
+            frameCapacity: frameCapacity,
+            writeIndex: writeIndex,
+            windowFrames: 1024,
+            previousLeft: leftLevel,
+            previousRight: rightLevel,
+            smoothing: 0.7
+        )
+        leftLevel = l
+        rightLevel = r
     }
 }
