@@ -1,11 +1,24 @@
-#!/usr/bin/env swift
+// SHARED: AudioProfiles/Models/AudioDevice.swift AudioProfiles/Models/ProfileMode.swift AudioProfiles/Models/Hotkey.swift AudioProfiles/Models/Profile.swift AudioProfiles/Models/DeviceHistoryEntry.swift AudioProfiles/Models/EQSettings.swift AudioProfiles/Models/EQSettings+Combine.swift AudioProfiles/Core/AudioCore.swift
 //
 // PipelineTests.swift
 //
-// Standalone tests for the unidirectional pipeline, device priority resolution,
+// Tests for the unidirectional pipeline, device priority resolution,
 // EQ layer combination, fingerprint dedup, and profile trigger matching.
 //
-// Run: swift Tests/PipelineTests.swift
+// This file compiles against the REAL production models and canonical core logic
+// (see the `// SHARED:` directive above — build.sh compiles those Foundation-only
+// sources alongside this test). AudioDevice, ProfileMode, EQSettings, EQBand,
+// EQFilterType, TriggerRule, Profile, and EQSettings.combine are the shipped types.
+// AudioCore.findBestTriggerMatch and AudioCore.computeReadPlan are the shipped logic.
+//
+// What is NOT in a shared file and is therefore kept as a clearly-labelled LOCAL
+// MIRROR (faithful to current production, pending extraction into AudioCore):
+//   - Device priority resolution flow (ProfileManager.performEvaluation)
+//   - AudioPipelineService.apply action selection
+//   - PipelineFingerprint (production's is a PRIVATE struct in ProfileManager —
+//     it cannot be imported; the mirror here only proves structural equality)
+//
+// Run: swift Tests/PipelineTests.swift   (or via build.sh, which honours // SHARED:)
 //
 // These tests validate:
 //   1. Device priority resolution — picks highest-priority connected device
@@ -22,154 +35,16 @@
 import Foundation
 
 // ============================================================================
-// MARK: - Lightweight models (mirrored from app, no Core Audio dependency)
+// MARK: - Structural mirror: PipelineFingerprint
 // ============================================================================
-
-struct AudioDevice: Identifiable, Equatable {
-    let id: String
-    let name: String
-    let transportType: String
-    let isInput: Bool
-    let isOutput: Bool
-}
-
-enum ProfileMode: String {
-    case `public`
-    case `private`
-
-    var displayName: String {
-        switch self {
-        case .public: return "Speakers"
-        case .private: return "Headphones"
-        }
-    }
-}
-
-enum EQFilterType: Int {
-    case parametric = 0
-    case lowShelf   = 7
-    case highShelf  = 8
-}
-
-struct EQBand: Equatable {
-    var frequency: Float
-    var gain: Float
-    var bandwidth: Float
-    var filterType: EQFilterType
-
-    var isFlat: Bool { abs(gain) < 0.01 }
-
-    static func at(_ frequency: Float) -> EQBand {
-        EQBand(frequency: frequency, gain: 0, bandwidth: 1.0, filterType: .parametric)
-    }
-}
-
-struct EQSettings: Equatable {
-    static let standardFrequencies: [Float] = [32, 64, 125, 250, 500, 1_000, 2_000, 4_000, 8_000, 16_000]
-    static let gainRange: ClosedRange<Float>   = -12 ... 12
-    static let preampRange: ClosedRange<Float> = -12 ... 12
-
-    var preamp: Float
-    var bands: [EQBand]
-
-    var isFlat: Bool {
-        abs(preamp) < 0.01 && bands.allSatisfy(\.isFlat)
-    }
-
-    static var flat: EQSettings {
-        var bands = standardFrequencies.map { EQBand.at($0) }
-        bands[0].filterType = .lowShelf
-        bands[9].filterType = .highShelf
-        return EQSettings(preamp: 0, bands: bands)
-    }
-
-    /// Additive combination: base + overlay gains, clamped
-    static func combine(base: EQSettings, overlay: EQSettings) -> EQSettings {
-        guard !overlay.isFlat else { return base }
-        guard !base.isFlat else {
-            var result = overlay
-            for i in 0..<min(result.bands.count, base.bands.count) {
-                result.bands[i].filterType = base.bands[i].filterType
-                result.bands[i].bandwidth = base.bands[i].bandwidth
-                result.bands[i].frequency = base.bands[i].frequency
-            }
-            return result
-        }
-
-        var combined = base
-        combined.preamp = clamp(base.preamp + overlay.preamp, EQSettings.preampRange)
-        let count = min(base.bands.count, overlay.bands.count)
-        for i in 0..<count {
-            combined.bands[i].gain = clamp(
-                base.bands[i].gain + overlay.bands[i].gain,
-                EQSettings.gainRange
-            )
-        }
-        return combined
-    }
-}
-
-/// A trigger rule can match either a specific device or a device transport class.
-enum TriggerRule: Equatable, Hashable {
-    case specificDevice(id: String)
-    case transportType(type: String)  // "Bluetooth", "USB", "Built-In", etc.
-
-    var displayName: String {
-        switch self {
-        case .specificDevice(let id): return id
-        case .transportType(let type): return "Any \(type)"
-        }
-    }
-}
-
-struct Profile: Identifiable {
-    let id: UUID
-    var name: String
-    var triggerDeviceIDs: [String]
-    var triggerRules: [TriggerRule]
-    var publicOutputPriority: [String]
-    var publicInputPriority: [String]
-    var privateOutputPriority: [String]
-    var privateInputPriority: [String]
-    var preferredMode: ProfileMode
-    var isSystemDefault: Bool = false
-
-    /// Convenience initializer: auto-derives triggerRules from triggerDeviceIDs if not provided
-    init(id: UUID, name: String, triggerDeviceIDs: [String],
-         triggerRules: [TriggerRule]? = nil,
-         publicOutputPriority: [String], publicInputPriority: [String],
-         privateOutputPriority: [String], privateInputPriority: [String],
-         preferredMode: ProfileMode, isSystemDefault: Bool = false) {
-        self.id = id
-        self.name = name
-        self.triggerRules = triggerRules ?? triggerDeviceIDs.map { .specificDevice(id: $0) }
-        self.triggerDeviceIDs = Self.deriveDeviceIDs(from: self.triggerRules)
-        self.publicOutputPriority = publicOutputPriority
-        self.publicInputPriority = publicInputPriority
-        self.privateOutputPriority = privateOutputPriority
-        self.privateInputPriority = privateInputPriority
-        self.preferredMode = preferredMode
-        self.isSystemDefault = isSystemDefault
-    }
-
-    func priorityList(isOutput: Bool, mode: ProfileMode) -> [String] {
-        switch (isOutput, mode) {
-        case (true,  .public):  return publicOutputPriority
-        case (true,  .private): return privateOutputPriority
-        case (false, .public):  return publicInputPriority
-        case (false, .private): return privateInputPriority
-        }
-    }
-
-    /// Derive legacy triggerDeviceIDs from triggerRules (only specificDevice entries)
-    static func deriveDeviceIDs(from rules: [TriggerRule]) -> [String] {
-        rules.compactMap {
-            if case .specificDevice(let id) = $0 { return id }
-            return nil
-        }
-    }
-}
-
+//
+// PRODUCTION MIRROR (structural only). The real `PipelineFingerprint` is a
+// PRIVATE struct inside `ProfileManager` and cannot be imported. This copy is a
+// byte-for-byte field mirror so the dedup *shape* can be exercised. The equality
+// tests below therefore only prove that Swift synthesises `Equatable` field-wise —
+// they do NOT test production's actual dedup call site. Kept for regression value
+// on the fingerprint field set; labelled honestly so nobody mistakes it for a
+// production integration test.
 struct PipelineFingerprint: Equatable {
     let profileID: UUID?
     let mode: ProfileMode
@@ -179,22 +54,78 @@ struct PipelineFingerprint: Equatable {
     let needsVirtualDriver: Bool
 }
 
+// ============================================================================
+// MARK: - Test convenience: Profile builder + trigger-match wrapper
+// ============================================================================
+
+/// Thin convenience over the real `Profile.init`, which requires `iconName`.
+/// Keeps the (many) call sites below terse while constructing the SHIPPED type.
+func makeProfile(
+    id: UUID = UUID(),
+    name: String,
+    triggerDeviceIDs: [String],
+    triggerRules: [TriggerRule]? = nil,
+    publicOutputPriority: [String], publicInputPriority: [String],
+    privateOutputPriority: [String], privateInputPriority: [String],
+    preferredMode: ProfileMode = .public,
+    isSystemDefault: Bool = false
+) -> Profile {
+    Profile(
+        id: id, name: name, iconName: "speaker",
+        triggerDeviceIDs: triggerDeviceIDs,
+        triggerRules: triggerRules,
+        publicOutputPriority: publicOutputPriority,
+        publicInputPriority: publicInputPriority,
+        privateOutputPriority: privateOutputPriority,
+        privateInputPriority: privateInputPriority,
+        preferredMode: preferredMode,
+        isSystemDefault: isSystemDefault
+    )
+}
+
+/// Result wrapper so existing assertions on `.profile` keep working while the
+/// match itself is computed by the REAL `AudioCore.findBestTriggerMatch`, which
+/// returns a `profileID` (not the profile object). We resolve the ID back to the
+/// profile here — no matching logic is reimplemented.
 struct TriggerMatchResult {
     let profile: Profile
     let matchCount: Int
+    let specificCount: Int
     let primaryTriggerDevice: String
 }
 
-// ============================================================================
-// MARK: - Helper functions (extracted pure logic from services)
-// ============================================================================
-
-func clamp(_ value: Float, _ range: ClosedRange<Float>) -> Float {
-    max(range.lowerBound, min(range.upperBound, value))
+func findBestTriggerMatch(
+    profiles: [Profile],
+    currentDeviceIDs: Set<String>,
+    currentDevices: [AudioDevice] = []
+) -> TriggerMatchResult? {
+    guard let m = AudioCore.findBestTriggerMatch(
+        profiles: profiles,
+        currentDeviceIDs: currentDeviceIDs,
+        currentDevices: currentDevices
+    ) else { return nil }
+    guard let profile = profiles.first(where: { $0.id == m.profileID }) else { return nil }
+    return TriggerMatchResult(
+        profile: profile,
+        matchCount: m.matchCount,
+        specificCount: m.specificCount,
+        primaryTriggerDevice: m.primaryTriggerDevice
+    )
 }
 
-/// Resolve the best output device from a priority list, given connected devices.
-/// Returns (device, uid) or nil if no priority device is connected.
+// ============================================================================
+// MARK: - LOCAL MIRROR: device priority resolution (pending extraction)
+// ============================================================================
+//
+// PRODUCTION MIRROR of `ProfileManager.performEvaluation`'s output resolution
+// walk. NOT yet in AudioCore. Faithful to production semantics:
+//   - Walk the priority list; the FIRST connected output whose id matches wins.
+//   - Virtual-device look-through: when the matched entry IS our virtual device,
+//     production resolves to the real EQ target ONLY when EQ is running AND that
+//     target is connected. Otherwise it leaves the resolution nil and `break`s —
+//     it does NOT `continue` to the next priority entry. (This is the fixed drift:
+//     the old reimplementation used `continue`.) Falling through to nil lets the
+//     caller apply system-default resolution, exactly as production does.
 func resolveOutputDevice(
     priorityList: [String],
     connectedDevices: [AudioDevice],
@@ -204,15 +135,16 @@ func resolveOutputDevice(
 ) -> (device: AudioDevice, uid: String)? {
     for deviceID in priorityList {
         if let device = connectedDevices.first(where: { $0.id == deviceID && $0.isOutput }) {
-            // Virtual device look-through
+            // Is this our virtual device? Look through to the real EQ target.
             if let vUID = virtualDeviceUID, device.id == vUID {
-                if eqRunning, let realUID = eqTargetUID {
-                    if let realDevice = connectedDevices.first(where: { $0.id == realUID && $0.isOutput }) {
-                        return (realDevice, realUID)
-                    }
+                if eqRunning, let realUID = eqTargetUID,
+                   let realDevice = connectedDevices.first(where: { $0.id == realUID && $0.isOutput }) {
+                    return (realDevice, realUID)
                 }
-                // Virtual device but can't resolve — skip (return nil for this entry)
-                continue
+                // Virtual entry but EQ not running / target absent → production does
+                // nothing in this branch and then `break`s out of the walk (matches
+                // `performEvaluation`). Result stays nil → caller uses system default.
+                break
             }
             return (device, device.id)
         }
@@ -221,6 +153,7 @@ func resolveOutputDevice(
 }
 
 /// Resolve the best input device from a priority list, given connected devices.
+/// Mirrors `ProfileManager.performEvaluation`'s input walk (first connected input wins).
 func resolveInputDevice(
     priorityList: [String],
     connectedDevices: [AudioDevice]
@@ -231,67 +164,6 @@ func resolveInputDevice(
         }
     }
     return nil
-}
-
-/// Find best matching profile by trigger rules (most matches wins).
-/// Supports both specificDevice and transportType rules.
-/// Tie-breaking: specific matches rank higher than class matches.
-func findBestTriggerMatch(
-    profiles: [Profile],
-    currentDeviceIDs: Set<String>,
-    currentDevices: [AudioDevice] = []
-) -> TriggerMatchResult? {
-    var bestMatch: TriggerMatchResult? = nil
-    var bestSpecificCount = 0
-
-    for profile in profiles {
-        guard !profile.triggerRules.isEmpty else { continue }
-
-        var matchCount = 0
-        var specificCount = 0
-        var primaryDevice: String? = nil
-
-        for rule in profile.triggerRules {
-            switch rule {
-            case .specificDevice(let id):
-                if currentDeviceIDs.contains(id) {
-                    matchCount += 1
-                    specificCount += 1
-                    if primaryDevice == nil { primaryDevice = id }
-                }
-            case .transportType(let type):
-                if currentDevices.contains(where: { $0.transportType == type }) {
-                    matchCount += 1
-                    if primaryDevice == nil {
-                        primaryDevice = currentDevices.first(where: { $0.transportType == type })?.id ?? "Any \(type)"
-                    }
-                }
-            }
-        }
-
-        if matchCount > 0 {
-            let isBetter: Bool
-            if bestMatch == nil {
-                isBetter = true
-            } else if matchCount > bestMatch!.matchCount {
-                isBetter = true
-            } else if matchCount == bestMatch!.matchCount && specificCount > bestSpecificCount {
-                isBetter = true  // Tie-break: prefer more specific matches
-            } else {
-                isBetter = false
-            }
-
-            if isBetter {
-                bestMatch = TriggerMatchResult(
-                    profile: profile,
-                    matchCount: matchCount,
-                    primaryTriggerDevice: primaryDevice!
-                )
-                bestSpecificCount = specificCount
-            }
-        }
-    }
-    return bestMatch
 }
 
 // ============================================================================
@@ -344,8 +216,7 @@ let builtinInput = AudioDevice(id: "builtin-input-uid", name: "MacBook Pro Micro
 let usbMic = AudioDevice(id: "usb-mic-uid", name: "Blue Yeti", transportType: "USB", isInput: true, isOutput: false)
 let virtualDevice = AudioDevice(id: "virtual-eq-uid", name: "Studio Monitors EQ", transportType: "Other", isInput: false, isOutput: true)
 
-let homeProfile = Profile(
-    id: UUID(),
+let homeProfile = makeProfile(
     name: "Home Studio",
     triggerDeviceIDs: ["speakers-uid", "beyerdynamic-uid"],
     publicOutputPriority: ["speakers-uid", "beyerdynamic-uid", "builtin-output-uid"],
@@ -355,8 +226,7 @@ let homeProfile = Profile(
     preferredMode: .public
 )
 
-let officeProfile = Profile(
-    id: UUID(),
+let officeProfile = makeProfile(
     name: "Office",
     triggerDeviceIDs: ["airpods-uid"],
     publicOutputPriority: ["airpods-uid", "builtin-output-uid"],
@@ -366,8 +236,7 @@ let officeProfile = Profile(
     preferredMode: .public
 )
 
-let systemDefault = Profile(
-    id: UUID(),
+let systemDefault = makeProfile(
     name: "System Default",
     triggerDeviceIDs: [],
     publicOutputPriority: [],
@@ -564,7 +433,11 @@ do {
 section("Virtual Device Look-through")
 
 do {
-    // Virtual device in priority list, EQ running → resolve to real device
+    // Virtual device FIRST in priority, EQ running, but the real EQ target is NOT
+    // connected. FIXED DRIFT: the old reimplementation `continue`d and fell back to
+    // headphones. Production `performEvaluation` `break`s after the virtual entry
+    // matched but could not be looked through → resolution stays nil → caller uses
+    // system default. Old expectation: result == headphones. New: result == nil.
     let devices = [virtualDevice, headphones, builtinOutput]
     let priority = ["virtual-eq-uid", "beyerdynamic-uid", "builtin-output-uid"]
     let result = resolveOutputDevice(
@@ -572,12 +445,9 @@ do {
         connectedDevices: devices,
         virtualDeviceUID: "virtual-eq-uid",
         eqRunning: true,
-        eqTargetUID: "speakers-uid"  // EQ is targeting speakers
+        eqTargetUID: "speakers-uid"  // EQ targets speakers, which is NOT connected
     )
-    // speakers-uid is the real target, but it's not in connectedDevices → look-through fails, skip
-    // Should fall back to headphones
-    check(result != nil, "Virtual device look-through with missing real device → falls to next")
-    checkEqual(result?.uid, "beyerdynamic-uid", "Falls back to headphones when real device not connected")
+    check(result == nil, "Virtual first + EQ target absent → break, fall through to system default (production `break`)")
 }
 
 do {
@@ -596,7 +466,12 @@ do {
 }
 
 do {
-    // Virtual device in priority list, EQ NOT running → skip virtual device
+    // Virtual device is FIRST in priority list, EQ NOT running.
+    // FIXED DRIFT: the old reimplementation used `continue`, so it walked past the
+    // virtual entry and picked headphones. Production `performEvaluation` uses
+    // `break` — the virtual entry matched (it IS connected), so the loop stops, no
+    // real device is resolved, and resolution falls through to the system default.
+    // Old expectation: result == headphones. New expectation: result == nil.
     let devices = [virtualDevice, headphones, builtinOutput]
     let priority = ["virtual-eq-uid", "beyerdynamic-uid", "builtin-output-uid"]
     let result = resolveOutputDevice(
@@ -606,7 +481,23 @@ do {
         eqRunning: false,
         eqTargetUID: nil
     )
-    checkEqual(result?.uid, "beyerdynamic-uid", "EQ not running → skip virtual device, pick headphones")
+    check(result == nil, "EQ not running + virtual is first priority → break, fall through to system default (production `break` semantics)")
+}
+
+do {
+    // Corollary: when EQ is not running and the virtual device is NOT first, a
+    // higher-priority real device still resolves normally (the break only triggers
+    // once the virtual entry is the one matched).
+    let devices = [headphones, virtualDevice, builtinOutput]
+    let priority = ["beyerdynamic-uid", "virtual-eq-uid", "builtin-output-uid"]
+    let result = resolveOutputDevice(
+        priorityList: priority,
+        connectedDevices: devices,
+        virtualDeviceUID: "virtual-eq-uid",
+        eqRunning: false,
+        eqTargetUID: nil
+    )
+    checkEqual(result?.uid, "beyerdynamic-uid", "Real device ahead of virtual entry resolves normally")
 }
 
 // ============================================================================
@@ -812,10 +703,15 @@ do {
 }
 
 // ============================================================================
-// MARK: - Test: Pipeline Fingerprint Dedup
+// MARK: - Test: Pipeline Fingerprint Dedup (STRUCTURAL MIRROR)
 // ============================================================================
-
-section("Pipeline Fingerprint Dedup")
+//
+// NOTE: production's `PipelineFingerprint` is a PRIVATE struct inside ProfileManager
+// and cannot be imported. These tests use the local structural mirror, so they only
+// prove that Swift synthesises field-wise `Equatable` for that field set — they do
+// NOT exercise production's dedup call site (`if fingerprint == lastFingerprint`).
+// Kept for regression value on the field set; not an integration test.
+section("Pipeline Fingerprint Dedup (structural mirror)")
 
 do {
     let fp1 = PipelineFingerprint(
@@ -1262,7 +1158,7 @@ section("Trigger Matching — Edge Cases")
 
 do {
     // Profile with trigger device that is input-only
-    let inputTriggerProfile = Profile(
+    let inputTriggerProfile = makeProfile(
         id: UUID(), name: "Mic Profile",
         triggerDeviceIDs: ["usb-mic-uid"],
         publicOutputPriority: ["builtin-output-uid"],
@@ -1278,14 +1174,14 @@ do {
 
 do {
     // Two profiles with same match count → first one wins
-    let profile1 = Profile(
+    let profile1 = makeProfile(
         id: UUID(), name: "Profile A",
         triggerDeviceIDs: ["speakers-uid"],
         publicOutputPriority: [], publicInputPriority: [],
         privateOutputPriority: [], privateInputPriority: [],
         preferredMode: .public
     )
-    let profile2 = Profile(
+    let profile2 = makeProfile(
         id: UUID(), name: "Profile B",
         triggerDeviceIDs: ["speakers-uid"],
         publicOutputPriority: [], publicInputPriority: [],
@@ -1299,7 +1195,7 @@ do {
 
 do {
     // Profile with empty triggers → never matches
-    let noTrigger = Profile(
+    let noTrigger = makeProfile(
         id: UUID(), name: "No Triggers",
         triggerDeviceIDs: [],
         publicOutputPriority: ["speakers-uid"], publicInputPriority: [],
@@ -1378,37 +1274,22 @@ func simulateEvaluation(
     eqRunning: Bool = false,
     eqTargetUID: String? = nil
 ) -> PipelineFingerprint {
-    // Step 1: resolve output
-    var resolvedOutputDevice: AudioDevice?
-    var resolvedOutputUID: String?
-
+    // Step 1: resolve output (falls back to system default, mirroring performEvaluation)
     let outputList = profile.priorityList(isOutput: true, mode: mode)
-    if let r = resolveOutputDevice(
+    let resolvedOutputUID: String? = resolveOutputDevice(
         priorityList: outputList,
         connectedDevices: connectedDevices,
         virtualDeviceUID: virtualDeviceUID,
         eqRunning: eqRunning,
         eqTargetUID: eqTargetUID
-    ) {
-        resolvedOutputDevice = r.device
-        resolvedOutputUID = r.uid
-    } else {
-        resolvedOutputDevice = defaultOutput
-        resolvedOutputUID = defaultOutput?.id
-    }
+    )?.uid ?? defaultOutput?.id
 
-    // Step 2: resolve input
-    var resolvedInputDevice: AudioDevice?
-    var resolvedInputUID: String?
-
+    // Step 2: resolve input (falls back to system default)
     let inputList = profile.priorityList(isOutput: false, mode: mode)
-    if let r = resolveInputDevice(priorityList: inputList, connectedDevices: connectedDevices) {
-        resolvedInputDevice = r.device
-        resolvedInputUID = r.uid
-    } else {
-        resolvedInputDevice = defaultInput
-        resolvedInputUID = defaultInput?.id
-    }
+    let resolvedInputUID: String? = resolveInputDevice(
+        priorityList: inputList,
+        connectedDevices: connectedDevices
+    )?.uid ?? defaultInput?.id
 
     // Step 3: compute effective EQ
     let baseEQ = deviceEQ[resolvedOutputUID ?? ""] ?? .flat
@@ -1788,7 +1669,7 @@ section("EQ Changes — Fingerprint Sensitivity")
 
 do {
     // Same profile + device, but EQ changes → different fingerprint
-    var eq1 = EQSettings.flat
+    let eq1 = EQSettings.flat
     var eq2 = EQSettings.flat
     eq2.bands[3].gain = 5.0
 
@@ -1827,7 +1708,7 @@ do {
 section("Single-Device Priority — Clear Behavior")
 
 do {
-    let singleDeviceProfile = Profile(
+    let singleDeviceProfile = makeProfile(
         id: UUID(),
         name: "Simple",
         triggerDeviceIDs: ["speakers-uid"],
@@ -2014,21 +1895,35 @@ do {
 }
 
 // ============================================================================
-// MARK: - Helper: stopSafe Behavior (mirrors EQEngineService.stopSafe fallback)
+// MARK: - LOCAL MIRROR: EQEngineService.stopSafe branch selection
 // ============================================================================
+//
+// FIXED CONTRADICTION: the old helper modelled a `connectedDeviceUIDs.contains(uid)`
+// connectivity gate and returned `canResolve`. Production has NO such gate. Reading
+// EQEngineService.stopSafe:
+//   - `stopSafe(switchTo:)` sets state=.stopping and ALWAYS schedules an async,
+//     generation-guarded teardown to that UID. Device resolution/connectivity is
+//     checked later, at teardown execution time — not here.
+//   - `stopSafe()` (no arg) hides the virtual device immediately IF `!isRunning`
+//     OR there is no `targetDeviceUID`; otherwise it tears down to the target UID.
+// This mirror captures only that branch selection (the shipped decision), not the
+// fictional synchronous connectivity resolution the old test asserted.
+enum StopSafeBranch: Equatable {
+    /// EQDriverService.hide() only — nothing running / nothing to switch to.
+    case hideOnly
+    /// Schedule async teardown, switching the default output to this UID.
+    case teardown(switchTo: String)
+}
 
-func stopSafeFallback(
-    isRunning: Bool,
-    targetDeviceUID: String?,
-    switchToUID: String?,
-    connectedDeviceUIDs: Set<String>
-) -> (action: String, canResolve: Bool) {
-    let uid = switchToUID ?? targetDeviceUID
-    guard isRunning, let uid = uid else {
-        return ("hideOnly", false)
-    }
-    let canResolve = connectedDeviceUIDs.contains(uid)
-    return ("switchTo:\(uid)", canResolve)
+/// Mirrors `stopSafe(switchTo:)` — unconditional teardown to the requested UID.
+func stopSafeSwitchTo(_ uid: String) -> StopSafeBranch {
+    .teardown(switchTo: uid)
+}
+
+/// Mirrors `stopSafe()` (no argument).
+func stopSafeNoArg(isRunning: Bool, targetDeviceUID: String?) -> StopSafeBranch {
+    guard isRunning, let uid = targetDeviceUID else { return .hideOnly }
+    return .teardown(switchTo: uid)
 }
 
 // ============================================================================
@@ -2044,19 +1939,31 @@ func shouldRecoverOrphan(
 }
 
 // ============================================================================
-// MARK: - Helper: Shared Memory Resync Decision
+// MARK: - Helper: Shared Memory Resync Decision (delegates to real AudioCore)
 // ============================================================================
-
+//
+// FIXED DRIFT: this helper used to reimplement the ring-buffer math and reported
+// `framesDropped = readIndex - writeIndex` for the reset case — attributing drops
+// to the wrong branch. It now delegates to the SHIPPED `AudioCore.computeReadPlan`,
+// so the tests describe real reader behaviour:
+//   - `writeIndex < readIndex` → driver RESET: reader snaps to writer, reads nothing,
+//     drops 0 (old ring data is simply abandoned; `didReset == true`).
+//   - `available > frameCapacity` → reader lapped: drops `available - capacity`.
+// "needsResync" here means "the cursor was force-moved": didReset OR frames dropped.
 func resyncDecision(
     writeIndex: UInt64,
     readIndex: UInt64,
-    frameCapacity: Int
-) -> (needsResync: Bool, framesDropped: Int) {
-    if writeIndex >= readIndex {
-        return (needsResync: false, framesDropped: 0)
-    }
-    // writeIndex < readIndex means driver reset or wrap
-    return (needsResync: true, framesDropped: Int(readIndex - writeIndex))
+    frameCapacity: Int,
+    requestedFrames: Int = 4096
+) -> (needsResync: Bool, framesDropped: Int, plan: AudioCore.ReadPlan) {
+    let plan = AudioCore.computeReadPlan(
+        writeIndex: writeIndex,
+        readIndex: readIndex,
+        frameCapacity: frameCapacity,
+        requestedFrames: requestedFrames
+    )
+    let needsResync = plan.didReset || plan.framesDropped > 0
+    return (needsResync: needsResync, framesDropped: plan.framesDropped, plan: plan)
 }
 
 // ============================================================================
@@ -2081,11 +1988,11 @@ section("Trigger Tie-Breaking (Bug 16)")
 
 // Positive: Higher match count wins regardless of position
 do {
-    let p1 = Profile(id: UUID(), name: "One Match", triggerDeviceIDs: ["speakers-uid"],
+    let p1 = makeProfile(id: UUID(), name: "One Match", triggerDeviceIDs: ["speakers-uid"],
                      publicOutputPriority: [], publicInputPriority: [],
                      privateOutputPriority: [], privateInputPriority: [],
                      preferredMode: .public)
-    let p2 = Profile(id: UUID(), name: "Two Matches", triggerDeviceIDs: ["speakers-uid", "beyerdynamic-uid"],
+    let p2 = makeProfile(id: UUID(), name: "Two Matches", triggerDeviceIDs: ["speakers-uid", "beyerdynamic-uid"],
                      publicOutputPriority: [], publicInputPriority: [],
                      privateOutputPriority: [], privateInputPriority: [],
                      preferredMode: .public)
@@ -2096,11 +2003,11 @@ do {
 
 // Regression (Bug 16): Tied match count → first in array wins (arbitrary)
 do {
-    let p1 = Profile(id: UUID(), name: "First", triggerDeviceIDs: ["speakers-uid"],
+    let p1 = makeProfile(id: UUID(), name: "First", triggerDeviceIDs: ["speakers-uid"],
                      publicOutputPriority: [], publicInputPriority: [],
                      privateOutputPriority: [], privateInputPriority: [],
                      preferredMode: .public)
-    let p2 = Profile(id: UUID(), name: "Second", triggerDeviceIDs: ["beyerdynamic-uid"],
+    let p2 = makeProfile(id: UUID(), name: "Second", triggerDeviceIDs: ["beyerdynamic-uid"],
                      publicOutputPriority: [], publicInputPriority: [],
                      privateOutputPriority: [], privateInputPriority: [],
                      preferredMode: .public)
@@ -2110,15 +2017,15 @@ do {
 
 // Regression (Bug 16): Three-way tie → first wins
 do {
-    let p1 = Profile(id: UUID(), name: "A", triggerDeviceIDs: ["speakers-uid"],
+    let p1 = makeProfile(id: UUID(), name: "A", triggerDeviceIDs: ["speakers-uid"],
                      publicOutputPriority: [], publicInputPriority: [],
                      privateOutputPriority: [], privateInputPriority: [],
                      preferredMode: .public)
-    let p2 = Profile(id: UUID(), name: "B", triggerDeviceIDs: ["beyerdynamic-uid"],
+    let p2 = makeProfile(id: UUID(), name: "B", triggerDeviceIDs: ["beyerdynamic-uid"],
                      publicOutputPriority: [], publicInputPriority: [],
                      privateOutputPriority: [], privateInputPriority: [],
                      preferredMode: .public)
-    let p3 = Profile(id: UUID(), name: "C", triggerDeviceIDs: ["airpods-uid"],
+    let p3 = makeProfile(id: UUID(), name: "C", triggerDeviceIDs: ["airpods-uid"],
                      publicOutputPriority: [], publicInputPriority: [],
                      privateOutputPriority: [], privateInputPriority: [],
                      preferredMode: .public)
@@ -2128,11 +2035,11 @@ do {
 
 // Positive: Profile with fewer matches loses to profile with more matches
 do {
-    let p1 = Profile(id: UUID(), name: "One", triggerDeviceIDs: ["speakers-uid"],
+    let p1 = makeProfile(id: UUID(), name: "One", triggerDeviceIDs: ["speakers-uid"],
                      publicOutputPriority: [], publicInputPriority: [],
                      privateOutputPriority: [], privateInputPriority: [],
                      preferredMode: .public)
-    let p2 = Profile(id: UUID(), name: "Three", triggerDeviceIDs: ["speakers-uid", "beyerdynamic-uid", "airpods-uid"],
+    let p2 = makeProfile(id: UUID(), name: "Three", triggerDeviceIDs: ["speakers-uid", "beyerdynamic-uid", "airpods-uid"],
                      publicOutputPriority: [], publicInputPriority: [],
                      privateOutputPriority: [], privateInputPriority: [],
                      preferredMode: .public)
@@ -2142,7 +2049,7 @@ do {
 
 // Negative: No triggers on any profile → nil
 do {
-    let p1 = Profile(id: UUID(), name: "NoTriggers", triggerDeviceIDs: [],
+    let p1 = makeProfile(id: UUID(), name: "NoTriggers", triggerDeviceIDs: [],
                      publicOutputPriority: [], publicInputPriority: [],
                      privateOutputPriority: [], privateInputPriority: [],
                      preferredMode: .public)
@@ -2152,7 +2059,7 @@ do {
 
 // Negative: No devices match any triggers → nil
 do {
-    let p1 = Profile(id: UUID(), name: "Unmatched", triggerDeviceIDs: ["unknown-uid-1", "unknown-uid-2"],
+    let p1 = makeProfile(id: UUID(), name: "Unmatched", triggerDeviceIDs: ["unknown-uid-1", "unknown-uid-2"],
                      publicOutputPriority: [], publicInputPriority: [],
                      privateOutputPriority: [], privateInputPriority: [],
                      preferredMode: .public)
@@ -2167,49 +2074,47 @@ do {
 }
 
 // ============================================================================
-// MARK: - Test: stopSafe with Non-Existent Device UID (Bug 6)
+// MARK: - Test: stopSafe branch selection
 // ============================================================================
+//
+// REWRITTEN (was "stopSafe with Non-Existent Device UID (Bug 6)"). The old tests
+// asserted a synchronous `connectedDeviceUIDs.contains(uid)` "canResolve" gate that
+// production does NOT have — `stopSafe` schedules an async, generation-guarded
+// teardown and resolves the device at execution time. Those assertions modelled
+// fictional logic, so they are replaced with the SHIPPED branch selection.
+section("stopSafe branch selection")
 
-section("stopSafe with Non-Existent Device UID (Bug 6)")
-
-// Positive: Running, valid UID → can resolve
+// stopSafe(switchTo:) always schedules a teardown to the requested UID —
+// no connectivity check here (that happens later, inside the async teardown).
 do {
-    let result = stopSafeFallback(isRunning: true, targetDeviceUID: "speakers-uid",
-                                  switchToUID: "speakers-uid",
-                                  connectedDeviceUIDs: Set(["speakers-uid", "builtin-output-uid"]))
-    check(result.canResolve, "Running + connected device → can resolve")
+    let result = stopSafeSwitchTo("speakers-uid")
+    checkEqual(result, .teardown(switchTo: "speakers-uid"), "stopSafe(switchTo:) → teardown to that UID unconditionally")
 }
 
-// Regression (Bug 6): Running, disconnected device UID → cannot resolve
+// Even a currently-disconnected UID still schedules a teardown (production defers
+// resolution to teardown time; it does NOT refuse up front). This is the corrected
+// behaviour for the old "Bug 6" case.
 do {
-    let result = stopSafeFallback(isRunning: true, targetDeviceUID: "speakers-uid",
-                                  switchToUID: "speakers-uid",
-                                  connectedDeviceUIDs: Set(["builtin-output-uid"]))
-    check(!result.canResolve, "Running + disconnected device → cannot resolve (Bug 6)")
+    let result = stopSafeSwitchTo("disconnected-uid")
+    checkEqual(result, .teardown(switchTo: "disconnected-uid"), "stopSafe(switchTo:) schedules teardown even for a not-yet-connected UID (resolved at teardown time)")
 }
 
-// Positive: stopSafe() no-arg with targetUID → uses targetUID
+// stopSafe() (no arg), running + target present → teardown to target UID.
 do {
-    let result = stopSafeFallback(isRunning: true, targetDeviceUID: "speakers-uid",
-                                  switchToUID: nil,
-                                  connectedDeviceUIDs: Set(["speakers-uid"]))
-    checkEqual(result.action, "switchTo:speakers-uid", "No switchTo → uses targetDeviceUID")
+    let result = stopSafeNoArg(isRunning: true, targetDeviceUID: "speakers-uid")
+    checkEqual(result, .teardown(switchTo: "speakers-uid"), "stopSafe() running + target → teardown to targetDeviceUID")
 }
 
-// Positive: Not running + no target → hide only
+// stopSafe() (no arg), not running / no target → hide only.
 do {
-    let result = stopSafeFallback(isRunning: false, targetDeviceUID: nil,
-                                  switchToUID: nil,
-                                  connectedDeviceUIDs: Set(["builtin-output-uid"]))
-    checkEqual(result.action, "hideOnly", "Not running + no target → hide only")
+    let result = stopSafeNoArg(isRunning: false, targetDeviceUID: nil)
+    checkEqual(result, .hideOnly, "stopSafe() not running + no target → hide only")
 }
 
-// Negative: Running + empty string UID → in connected set? no
+// stopSafe() (no arg), running but no target → hide only (guard requires both).
 do {
-    let result = stopSafeFallback(isRunning: true, targetDeviceUID: "",
-                                  switchToUID: "",
-                                  connectedDeviceUIDs: Set(["builtin-output-uid"]))
-    check(!result.canResolve, "Empty string UID → cannot resolve")
+    let result = stopSafeNoArg(isRunning: true, targetDeviceUID: nil)
+    checkEqual(result, .hideOnly, "stopSafe() running but no targetDeviceUID → hide only")
 }
 
 // ============================================================================
@@ -2259,11 +2164,25 @@ do {
 // MARK: - Helper: PipelineAction (mirrors AudioPipelineService decision logic)
 // ============================================================================
 
+// LOCAL MIRROR of AudioPipelineService.apply's action selection (pending extraction).
+// Faithful to the production if/else-if chain, in order:
+//   1. needsVirtualDriver && outputUID != nil && virtualName != nil:
+//        eqRunning && target == outputUID → hotUpdate (updateSettings)
+//        eqRunning                        → switchDevice
+//        !eqRunning                       → startPipeline
+//   2. else if eqRunning && outputUID != nil → stopEQ(switchTo:)   (stopSafe(switchTo:))
+//   3. else if eqRunning                     → stopEQNoTarget       (stopSafe())
+//   4. else if !needsVirtualDriver && outputDevice != nil → directSetDevice
+//   5. otherwise → noOp
+// Note: production branch 1 also falls through when `needsVirtualDriver` is true but
+// outputUID/virtualName is nil; here `virtualDeviceName` defaults from outputUID and
+// the vName-nil case only arises when outputUID is nil, handled by the ordering below.
 enum PipelineAction: Equatable {
     case hotUpdate(EQSettings)
     case switchDevice(realUID: String, settings: EQSettings, virtualName: String)
     case startPipeline(realUID: String, settings: EQSettings, virtualName: String)
     case stopEQ(switchTo: String)
+    case stopEQNoTarget                 // stopSafe() — EQ running, no output resolved
     case directSetDevice(String)
     case noOp
 }
@@ -2276,26 +2195,31 @@ func decidePipelineAction(
     effectiveEQ: EQSettings,
     virtualDeviceName: String?
 ) -> PipelineAction {
-    guard let outputUID = outputDeviceUID else { return .noOp }
-    let vName = virtualDeviceName ?? "\(outputUID) EQ"
-
-    if needsVirtualDriver {
+    // Branch 1: virtual driver needed and we have a concrete output UID.
+    if needsVirtualDriver, let outputUID = outputDeviceUID {
+        let vName = virtualDeviceName ?? "\(outputUID) EQ"
         if eqRunning {
-            if eqTargetUID == outputUID {
-                return .hotUpdate(effectiveEQ)
-            } else {
-                return .switchDevice(realUID: outputUID, settings: effectiveEQ, virtualName: vName)
-            }
+            return eqTargetUID == outputUID
+                ? .hotUpdate(effectiveEQ)
+                : .switchDevice(realUID: outputUID, settings: effectiveEQ, virtualName: vName)
         } else {
             return .startPipeline(realUID: outputUID, settings: effectiveEQ, virtualName: vName)
         }
-    } else {
-        if eqRunning {
-            return .stopEQ(switchTo: outputUID)
-        } else {
-            return .directSetDevice(outputUID)
-        }
     }
+    // Branch 2: EQ running, no longer needed, output UID present → stop + switch.
+    if eqRunning, let outputUID = outputDeviceUID {
+        return .stopEQ(switchTo: outputUID)
+    }
+    // Branch 3: EQ running, no output resolved → stopSafe() (hide/teardown to target).
+    if eqRunning {
+        return .stopEQNoTarget
+    }
+    // Branch 4: no EQ needed, concrete output → set it directly.
+    if !needsVirtualDriver, let outputUID = outputDeviceUID {
+        return .directSetDevice(outputUID)
+    }
+    // Branch 5: nothing to do.
+    return .noOp
 }
 
 // ============================================================================
@@ -2314,15 +2238,26 @@ do {
     checkEqual(action, .noOp, "nil outputDeviceUID → noOp")
 }
 
-// Regression (Bug 6): EQ running, needs stop, but switchTo UID may not resolve
+// EQ running, no longer needed, output UID present → stopEQ(switchTo:).
+// The switchTo UID may currently be disconnected; production still schedules the
+// stop and resolves the device at teardown time (there is no up-front gate).
 do {
     let action = decidePipelineAction(
         eqRunning: true, eqTargetUID: "speakers-uid",
         needsVirtualDriver: false, outputDeviceUID: "disconnected-uid",
         effectiveEQ: .flat, virtualDeviceName: nil
     )
-    // Should produce stopEQ action — the UID resolution failure happens at execution time
-    checkEqual(action, .stopEQ(switchTo: "disconnected-uid"), "EQ running + flat + disconnected device → stopEQ with potentially non-existent UID")
+    checkEqual(action, .stopEQ(switchTo: "disconnected-uid"), "EQ running + flat + output resolved → stopEQ(switchTo:), resolution deferred to teardown")
+}
+
+// EQ running, needs stop, but NO output device resolved → stopSafe() no-arg branch.
+do {
+    let action = decidePipelineAction(
+        eqRunning: true, eqTargetUID: "speakers-uid",
+        needsVirtualDriver: false, outputDeviceUID: nil,
+        effectiveEQ: .flat, virtualDeviceName: nil
+    )
+    checkEqual(action, .stopEQNoTarget, "EQ running + no output resolved → stopSafe() (branch 3), NOT noOp")
 }
 
 // Positive: EQ not running, no driver needed, valid UID → directSetDevice
@@ -2347,6 +2282,30 @@ do {
     checkEqual(action, .hotUpdate(eq), "Same device + non-flat → hotUpdate")
 }
 
+// Positive: EQ running, different device → switchDevice
+do {
+    var eq = EQSettings.flat
+    eq.bands[3].gain = 5.0
+    let action = decidePipelineAction(
+        eqRunning: true, eqTargetUID: "speakers-uid",
+        needsVirtualDriver: true, outputDeviceUID: "beyerdynamic-uid",
+        effectiveEQ: eq, virtualDeviceName: "Headphones EQ"
+    )
+    checkEqual(action, .switchDevice(realUID: "beyerdynamic-uid", settings: eq, virtualName: "Headphones EQ"), "EQ running + different device → switchDevice")
+}
+
+// Positive: EQ not running, driver needed → startPipeline
+do {
+    var eq = EQSettings.flat
+    eq.bands[3].gain = 5.0
+    let action = decidePipelineAction(
+        eqRunning: false, eqTargetUID: nil,
+        needsVirtualDriver: true, outputDeviceUID: "speakers-uid",
+        effectiveEQ: eq, virtualDeviceName: "Speakers EQ"
+    )
+    checkEqual(action, .startPipeline(realUID: "speakers-uid", settings: eq, virtualName: "Speakers EQ"), "EQ not running + driver needed → startPipeline")
+}
+
 // ============================================================================
 // MARK: - Test: Shared Memory Resync (Bug 10)
 // ============================================================================
@@ -2367,24 +2326,49 @@ do {
     checkEqual(result.framesDropped, 0, "No frames dropped when caught up")
 }
 
-// Positive: Writer reset (writeIndex < readIndex) → resync needed
+// Writer reset (writeIndex < readIndex) → cursor snapped to writer.
+// FIXED DRIFT: the old reimplementation reported framesDropped = readIndex - writeIndex.
+// Real AudioCore.computeReadPlan for the RESET branch drops 0 (the old ring contents
+// are abandoned, not "dropped"); it sets didReset=true, available=0.
+// Old expectation: framesDropped > 0. New expectation: didReset true, framesDropped == 0.
 do {
     let result = resyncDecision(writeIndex: 10, readIndex: 5000, frameCapacity: 4096)
-    check(result.needsResync, "Writer reset → resync needed")
-    check(result.framesDropped > 0, "Frames dropped on resync")
+    check(result.plan.didReset, "Writer reset (write<read) → didReset, cursor snaps to writer")
+    check(result.needsResync, "Reset counts as a resync (cursor force-moved)")
+    checkEqual(result.framesDropped, 0, "Reset drops 0 frames (old ring abandoned, not dropped)")
+    checkEqual(result.plan.framesToRead, 0, "Nothing read on the reset call")
+    checkEqual(result.plan.newReadIndex, 10, "Read cursor snapped to writer (10)")
 }
 
-// Regression (Bug 10): Resync drops frames silently
+// FIXED CONTRADICTION (was labelled "Bug 10 — dropped exactly capacity frames").
+// resyncDecision(writeIndex:0, readIndex:4096, cap:4096) is the RESET case (0 < 4096),
+// NOT the drop case. Real behaviour: didReset=true, framesDropped == 0.
+// Old expectation: framesDropped == 4096. New expectation: 0.
 do {
     let result = resyncDecision(writeIndex: 0, readIndex: 4096, frameCapacity: 4096)
-    check(result.needsResync, "Full-capacity behind → resync")
-    checkEqual(result.framesDropped, 4096, "Dropped exactly capacity frames (silent — Bug 10)")
+    check(result.plan.didReset, "write(0) < read(4096) → RESET branch (not a drop)")
+    checkEqual(result.framesDropped, 0, "Reset drops 0 frames — old expectation of 4096 was drift")
+    checkEqual(result.plan.newReadIndex, 0, "Cursor snapped to writer (0)")
 }
 
-// Positive: Writer just wrapped (large writeIndex, reader close behind)
+// The ACTUAL drop branch: reader lapped by more than a full ring
+// (available > frameCapacity). Only here does computeReadPlan drop frames.
+do {
+    // write ahead of read by 6000 > capacity 4096 → drops 6000 - 4096 = 1904.
+    let result = resyncDecision(writeIndex: 6000, readIndex: 0, frameCapacity: 4096)
+    check(!result.plan.didReset, "write >= read → not a reset")
+    check(result.needsResync, "Lapped reader → resync (frames dropped)")
+    checkEqual(result.framesDropped, 1904, "Dropped available - capacity = 6000 - 4096 = 1904")
+    checkEqual(result.plan.available, 4096, "Available clamped to capacity after skip-forward")
+    checkEqual(result.plan.newReadIndex, 6000, "Cursor advanced by the (clamped) read of 4096 from 1904")
+}
+
+// Positive: Writer ahead of reader within capacity → no resync, no drops
 do {
     let result = resyncDecision(writeIndex: 100000, readIndex: 99990, frameCapacity: 4096)
     check(!result.needsResync, "Writer ahead of reader (normal progress) → no resync")
+    checkEqual(result.framesDropped, 0, "10 frames available, well within capacity → nothing dropped")
+    checkEqual(result.plan.framesToRead, 10, "Reads the 10 available frames")
 }
 
 // Negative: Both at zero → no resync
@@ -2519,7 +2503,7 @@ section("Class-Based Trigger Rules (Item 14)")
 
 // Positive: .transportType("Bluetooth") matches any Bluetooth device
 do {
-    let btProfile = Profile(
+    let btProfile = makeProfile(
         id: UUID(),
         name: "BT Profile",
         triggerDeviceIDs: [],
@@ -2542,7 +2526,7 @@ do {
 
 // Positive: .specificDevice(id:) matches only that device
 do {
-    let specificProfile = Profile(
+    let specificProfile = makeProfile(
         id: UUID(),
         name: "Specific Profile",
         triggerDeviceIDs: [],
@@ -2565,7 +2549,7 @@ do {
 
 // Positive: Mixed rules work together — both specific + class match
 do {
-    let mixedProfile = Profile(
+    let mixedProfile = makeProfile(
         id: UUID(),
         name: "Mixed Profile",
         triggerDeviceIDs: [],
@@ -2591,7 +2575,7 @@ do {
 
 // Negative: .transportType("USB") does NOT match a Bluetooth device
 do {
-    let usbProfile = Profile(
+    let usbProfile = makeProfile(
         id: UUID(),
         name: "USB Profile",
         triggerDeviceIDs: [],
@@ -2613,7 +2597,7 @@ do {
 
 // Positive: Specific match beats class match in tie-breaking
 do {
-    let specificProfile = Profile(
+    let specificProfile = makeProfile(
         id: UUID(),
         name: "Specific Wins",
         triggerDeviceIDs: [],
@@ -2624,7 +2608,7 @@ do {
         privateInputPriority: [],
         preferredMode: .public
     )
-    let classProfile = Profile(
+    let classProfile = makeProfile(
         id: UUID(),
         name: "Class Match",
         triggerDeviceIDs: [],
@@ -2648,7 +2632,7 @@ do {
 
 // Migration: Profile constructed from legacy triggerDeviceIDs has correct triggerRules
 do {
-    let legacyProfile = Profile(
+    let legacyProfile = makeProfile(
         id: UUID(),
         name: "Legacy",
         triggerDeviceIDs: ["airpods-uid", "speakers-uid"],
@@ -2674,7 +2658,7 @@ do {
 // Class rule counts as 1 match even if multiple devices of that class are connected
 do {
     let btDevice2 = AudioDevice(id: "bt-speaker-uid", name: "BT Speaker", transportType: "Bluetooth", isInput: false, isOutput: true)
-    let btProfile = Profile(
+    let btProfile = makeProfile(
         id: UUID(),
         name: "BT Only",
         triggerDeviceIDs: [],
@@ -2712,12 +2696,19 @@ do {
 // MARK: - Test: EQ Bypass Toggle (F1)
 // ============================================================================
 
+// LOCAL MIRROR of ProfileManager.performEvaluation step 6/6b (pending extraction).
+// Production computes `combine(base:overlay:)` then flattens when EITHER the global
+// processing bypass OR the per-device bypass is set:
+//     if isProcessingBypassed || EQStore.shared.isBypassed(for: outputUID) { effectiveEQ = .flat }
+// This mirror ORs the same two flags. The single-`isBypassed` call sites below pass
+// the combined flag through `globalBypassed` (default false), so they keep working.
 func computeEffectiveEQWithBypass(
     baseEQ: EQSettings,
     overlay: EQSettings,
-    isBypassed: Bool
+    isBypassed: Bool,
+    globalBypassed: Bool = false
 ) -> EQSettings {
-    if isBypassed { return .flat }
+    if globalBypassed || isBypassed { return .flat }
     return EQSettings.combine(base: baseEQ, overlay: overlay)
 }
 
@@ -2777,6 +2768,35 @@ do {
     do {
         let result = computeEffectiveEQWithBypass(baseEQ: .flat, overlay: .flat, isBypassed: true)
         check(result.isFlat, "Bypass with flat base + flat overlay: still flat")
+    }
+
+    // 7. Per-device bypass flattens EQ even when the GLOBAL flag is off.
+    //    Matches production's OR-of-two-flags:
+    //    isProcessingBypassed(false) || EQStore.isBypassed(for:)(true) → flatten.
+    do {
+        let result = computeEffectiveEQWithBypass(
+            baseEQ: nonFlatBase, overlay: nonFlatOverlay,
+            isBypassed: true, globalBypassed: false
+        )
+        check(result.isFlat, "Per-device bypass ON + global OFF → EQ flattened (real OR-of-two-flags rule)")
+    }
+
+    // 8. Global bypass flattens EQ even when the PER-DEVICE flag is off.
+    do {
+        let result = computeEffectiveEQWithBypass(
+            baseEQ: nonFlatBase, overlay: nonFlatOverlay,
+            isBypassed: false, globalBypassed: true
+        )
+        check(result.isFlat, "Global bypass ON + per-device OFF → EQ flattened (real OR-of-two-flags rule)")
+    }
+
+    // 9. Neither flag set → EQ preserved (the OR is false).
+    do {
+        let result = computeEffectiveEQWithBypass(
+            baseEQ: nonFlatBase, overlay: nonFlatOverlay,
+            isBypassed: false, globalBypassed: false
+        )
+        check(!result.isFlat, "Neither bypass flag set → EQ preserved")
     }
 }
 

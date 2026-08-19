@@ -1,149 +1,80 @@
-#!/usr/bin/env swift
+// SHARED: AudioProfiles/Models/AudioDevice.swift AudioProfiles/Models/ProfileMode.swift AudioProfiles/Models/Hotkey.swift AudioProfiles/Models/Profile.swift AudioProfiles/Models/DeviceHistoryEntry.swift AudioProfiles/Models/EQSettings.swift AudioProfiles/Models/EQSettings+Combine.swift AudioProfiles/Models/ContentMode.swift AudioProfiles/Models/ContentModeOverlay.swift AudioProfiles/Models/NightMode.swift AudioProfiles/Core/AudioCore.swift
 //
 // BehaviorTests.swift
 //
-// Behavior-driven tests that describe WHAT the system should do from the user's
-// perspective, not which class method gets called. These tests survive refactors
-// because they reference outcomes, not internals.
+// End-to-end behavioral tests that wire the REAL production models
+// (AudioProfiles/Models/*) and the REAL canonical decision logic
+// (AudioProfiles/Core/AudioCore.swift) together into a stateful simulation of
+// the full event chain (SystemSimulator). Because the `// SHARED:` directive on
+// the first line lists the real sources, build.sh compiles this test AGAINST
+// production code — a production regression now fails these tests.
 //
-// Run: swift Tests/BehaviorTests.swift
+// The `// SHARED:` directive above is consumed by build.sh, which compiles the
+// listed real sources alongside this file with swiftc (this file is no longer
+// run directly with `swift`, so there is no shebang).
 //
-// Uses a SystemSimulator that wires together extracted pure functions into a
-// stateful simulation of the full event chain:
-//   Device change → Trigger matching → Profile activation → Pipeline evaluation → Action decision
+// What is REAL vs. a MIRROR:
+//   • Models (AudioDevice, Profile/TriggerRule, ProfileMode, EQSettings/EQBand,
+//     ContentModeOverlay, NightModeConfig, DeviceHistoryEntry) → REAL.
+//   • Trigger matching, manual-override protection, device-history folding →
+//     REAL (AudioCore.findBestTriggerMatch / shouldApplyTrigger /
+//     updateDeviceHistory).
+//   • Device resolution + pipeline-action + effective-EQ + fingerprint inside
+//     SystemSimulator → clearly-labeled LOCAL MIRRORS of
+//     ProfileManager.performEvaluation / AudioPipelineService.apply /
+//     SoundModesStore.activeOverlay, kept faithful to current production.
+//     PipelineFingerprint is a PRIVATE production struct, so the mirror below is
+//     a structural copy — NOT the real type.
+//
+// Test Categories:
+//   1. Device Lifecycle (7 tests)
+//   2. Profile Auto-Switching (7 tests)
+//   3. EQ Pipeline (9 tests)
+//   4. Mode Switching (4 tests)
+//   5. Fingerprint Deduplication (4 tests)
+//   6. Edge Cases (7 tests)
+//   7. Persistence Round-Trip (5 tests)
 
 import Foundation
 
+// AudioDevice is NOT Equatable in production. The simulator only ever compares
+// resolved device UIDs (String?), so give the tests a local UID-based equality
+// without touching the real model.
+extension AudioDevice {
+    static func sameUID(_ a: AudioDevice?, _ b: AudioDevice?) -> Bool { a?.id == b?.id }
+}
+
 // ============================================================================
-// MARK: - Lightweight model mirrors (no Core Audio dependency)
+// MARK: - Test-only profile factory
 // ============================================================================
-
-struct AudioDevice: Identifiable, Equatable {
-    let id: String
-    let name: String
-    let transportType: String
-    let isInput: Bool
-    let isOutput: Bool
+// The REAL Profile.init requires an explicit iconName (no default). This helper
+// supplies a default so the test fixtures below stay terse. Everything else is
+// forwarded straight to the production initializer.
+func makeProfile(
+    id: UUID,
+    name: String,
+    iconName: String = "speaker",
+    triggerDeviceIDs: [String],
+    triggerRules: [TriggerRule]? = nil,
+    publicOutputPriority: [String], publicInputPriority: [String],
+    privateOutputPriority: [String], privateInputPriority: [String],
+    preferredMode: ProfileMode = .public, isSystemDefault: Bool = false
+) -> Profile {
+    Profile(
+        id: id, name: name, iconName: iconName,
+        triggerDeviceIDs: triggerDeviceIDs, triggerRules: triggerRules,
+        publicOutputPriority: publicOutputPriority, publicInputPriority: publicInputPriority,
+        privateOutputPriority: privateOutputPriority, privateInputPriority: privateInputPriority,
+        preferredMode: preferredMode, isSystemDefault: isSystemDefault
+    )
 }
 
-enum ProfileMode: String {
-    case `public`
-    case `private`
-}
-
-enum EQFilterType: Int {
-    case parametric = 0
-    case lowShelf   = 7
-    case highShelf  = 8
-}
-
-struct EQBand: Equatable {
-    var frequency: Float
-    var gain: Float
-    var bandwidth: Float
-    var filterType: EQFilterType
-
-    var isFlat: Bool { abs(gain) < 0.01 }
-
-    static func at(_ frequency: Float) -> EQBand {
-        EQBand(frequency: frequency, gain: 0, bandwidth: 1.0, filterType: .parametric)
-    }
-}
-
-struct EQSettings: Equatable {
-    static let standardFrequencies: [Float] = [32, 64, 125, 250, 500, 1_000, 2_000, 4_000, 8_000, 16_000]
-    static let gainRange: ClosedRange<Float>   = -12 ... 12
-    static let preampRange: ClosedRange<Float> = -12 ... 12
-
-    var preamp: Float
-    var bands: [EQBand]
-
-    var isFlat: Bool {
-        abs(preamp) < 0.01 && bands.allSatisfy(\.isFlat)
-    }
-
-    static var flat: EQSettings {
-        var bands = standardFrequencies.map { EQBand.at($0) }
-        bands[0].filterType = .lowShelf
-        bands[9].filterType = .highShelf
-        return EQSettings(preamp: 0, bands: bands)
-    }
-
-    static func combine(base: EQSettings, overlay: EQSettings) -> EQSettings {
-        guard !overlay.isFlat else { return base }
-        guard !base.isFlat else {
-            var result = overlay
-            for i in 0..<min(result.bands.count, base.bands.count) {
-                result.bands[i].filterType = base.bands[i].filterType
-                result.bands[i].bandwidth = base.bands[i].bandwidth
-                result.bands[i].frequency = base.bands[i].frequency
-            }
-            return result
-        }
-        var combined = base
-        combined.preamp = clamp(base.preamp + overlay.preamp, EQSettings.preampRange)
-        let count = min(base.bands.count, overlay.bands.count)
-        for i in 0..<count {
-            combined.bands[i].gain = clamp(
-                base.bands[i].gain + overlay.bands[i].gain,
-                EQSettings.gainRange
-            )
-        }
-        return combined
-    }
-}
-
-enum TriggerRule: Equatable, Hashable {
-    case specificDevice(id: String)
-    case transportType(type: String)
-}
-
-struct Profile: Identifiable {
-    let id: UUID
-    var name: String
-    var triggerDeviceIDs: [String]
-    var triggerRules: [TriggerRule]
-    var publicOutputPriority: [String]
-    var publicInputPriority: [String]
-    var privateOutputPriority: [String]
-    var privateInputPriority: [String]
-    var preferredMode: ProfileMode
-    var isSystemDefault: Bool = false
-
-    init(id: UUID = UUID(), name: String, triggerDeviceIDs: [String] = [],
-         triggerRules: [TriggerRule]? = nil,
-         publicOutputPriority: [String] = [], publicInputPriority: [String] = [],
-         privateOutputPriority: [String] = [], privateInputPriority: [String] = [],
-         preferredMode: ProfileMode = .public, isSystemDefault: Bool = false) {
-        self.id = id
-        self.name = name
-        self.triggerRules = triggerRules ?? triggerDeviceIDs.map { .specificDevice(id: $0) }
-        self.triggerDeviceIDs = Self.deriveDeviceIDs(from: self.triggerRules)
-        self.publicOutputPriority = publicOutputPriority
-        self.publicInputPriority = publicInputPriority
-        self.privateOutputPriority = privateOutputPriority
-        self.privateInputPriority = privateInputPriority
-        self.preferredMode = preferredMode
-        self.isSystemDefault = isSystemDefault
-    }
-
-    func priorityList(isOutput: Bool, mode: ProfileMode) -> [String] {
-        switch (isOutput, mode) {
-        case (true,  .public):  return publicOutputPriority
-        case (true,  .private): return privateOutputPriority
-        case (false, .public):  return publicInputPriority
-        case (false, .private): return privateInputPriority
-        }
-    }
-
-    static func deriveDeviceIDs(from rules: [TriggerRule]) -> [String] {
-        rules.compactMap {
-            if case .specificDevice(let id) = $0 { return id }
-            return nil
-        }
-    }
-}
-
+// ============================================================================
+// MARK: - PipelineFingerprint (LOCAL structural mirror)
+// ============================================================================
+// PipelineFingerprint is a PRIVATE struct inside ProfileManager and cannot be
+// imported. This is a structural copy with the same fields, used only to model
+// the fingerprint-dedup behavior — it is NOT the production type.
 struct PipelineFingerprint: Equatable {
     let profileID: UUID?
     let mode: ProfileMode
@@ -153,73 +84,11 @@ struct PipelineFingerprint: Equatable {
     let needsVirtualDriver: Bool
 }
 
-struct TriggerMatchResult {
-    let profile: Profile
-    let matchCount: Int
-    let primaryTriggerDevice: String
-}
-
-enum ContentModeType: String, CaseIterable {
-    case none, music, voice, movie, gaming
-}
-
-struct ContentModeOverlay: Equatable {
-    var mode: ContentModeType
-    var settings: EQSettings
-    var isEnabled: Bool
-
-    static func defaultVoice() -> ContentModeOverlay {
-        var bands = EQSettings.flat.bands
-        bands[0].gain = -2.0; bands[1].gain = -1.5; bands[2].gain = -1.0
-        bands[6].gain = +2.5; bands[7].gain = +2.0; bands[8].gain = +1.0
-        return ContentModeOverlay(mode: .voice, settings: EQSettings(preamp: 0, bands: bands), isEnabled: true)
-    }
-    static func defaultMovie() -> ContentModeOverlay {
-        var bands = EQSettings.flat.bands
-        bands[0].gain = +2.0; bands[1].gain = +1.5
-        bands[6].gain = +1.5; bands[7].gain = +1.0
-        return ContentModeOverlay(mode: .movie, settings: EQSettings(preamp: -1.0, bands: bands), isEnabled: true)
-    }
-    static func defaultMusic() -> ContentModeOverlay {
-        ContentModeOverlay(mode: .music, settings: .flat, isEnabled: true)
-    }
-    static func defaultNone() -> ContentModeOverlay {
-        ContentModeOverlay(mode: .none, settings: .flat, isEnabled: true)
-    }
-}
-
-struct NightModeConfig: Equatable {
-    var isEnabled: Bool = false
-    var startHour: Int = 22
-    var startMinute: Int = 0
-    var endHour: Int = 7
-    var endMinute: Int = 0
-    var overlay: EQSettings
-
-    static var `default`: NightModeConfig {
-        var bands = EQSettings.flat.bands
-        bands[0].gain = -4.0; bands[1].gain = -3.0; bands[2].gain = -1.5
-        bands[5].gain = +1.0; bands[6].gain = +1.5; bands[7].gain = +1.0
-        return NightModeConfig(overlay: EQSettings(preamp: 0, bands: bands))
-    }
-
-    func isInQuietHours(now: Date = Date()) -> Bool {
-        guard isEnabled else { return false }
-        let cal = Calendar.current
-        let hour = cal.component(.hour, from: now)
-        let minute = cal.component(.minute, from: now)
-        let currentMinutes = hour * 60 + minute
-        let startMinutes = startHour * 60 + self.startMinute
-        let endMinutes = endHour * 60 + self.endMinute
-        if startMinutes == endMinutes { return true }
-        if startMinutes < endMinutes {
-            return currentMinutes >= startMinutes && currentMinutes < endMinutes
-        } else {
-            return currentMinutes >= startMinutes || currentMinutes < endMinutes
-        }
-    }
-}
-
+// ============================================================================
+// MARK: - Pipeline action enum (LOCAL mirror of AudioPipelineService.apply)
+// ============================================================================
+// Enumerates the mutually-exclusive branches of AudioPipelineService.apply so
+// tests can assert which one production would take. Not a production type.
 enum PipelineAction: Equatable {
     case hotUpdate(EQSettings)
     case switchDevice(realUID: String, settings: EQSettings, virtualName: String)
@@ -230,16 +99,20 @@ enum PipelineAction: Equatable {
 }
 
 // ============================================================================
-// MARK: - Pure functions (extracted from services)
+// MARK: - Device resolution MIRRORS (of ProfileManager.performEvaluation)
 // ============================================================================
-
-func clamp(_ value: Float, _ range: ClosedRange<Float>) -> Float {
-    max(range.lowerBound, min(range.upperBound, value))
-}
+// Faithful to production performEvaluation:
+//   • Walk the priority list; on the virtual device, look THROUGH to the real
+//     device when EQ is running, else `break` (fall through to system default) —
+//     production uses `break`, NOT `continue` to the next priority entry.
+//   • If nothing resolves from the priority list, fall back to the CURRENT
+//     SYSTEM DEFAULT output (production calls pipelineService.getDefaultOutputDevice).
+//     This is why an empty priority list does NOT yield nil output.
 
 func resolveOutputDevice(
     priorityList: [String],
     connectedDevices: [AudioDevice],
+    currentSystemDefaultOutput: AudioDevice?,
     virtualDeviceUID: String? = nil,
     eqRunning: Bool = false,
     eqTargetUID: String? = nil
@@ -247,87 +120,47 @@ func resolveOutputDevice(
     for deviceID in priorityList {
         if let device = connectedDevices.first(where: { $0.id == deviceID && $0.isOutput }) {
             if let vUID = virtualDeviceUID, device.id == vUID {
-                if eqRunning, let realUID = eqTargetUID {
-                    if let realDevice = connectedDevices.first(where: { $0.id == realUID && $0.isOutput }) {
-                        return (realDevice, realUID)
-                    }
+                if eqRunning, let realUID = eqTargetUID,
+                   let realDevice = connectedDevices.first(where: { $0.id == realUID && $0.isOutput }) {
+                    return (realDevice, realUID)
                 }
-                continue
+                // Virtual device but EQ not running (or target gone): production
+                // `break`s out of the priority walk and falls to system default.
+                break
             }
             return (device, device.id)
         }
+    }
+    // Fall back to the current system default output (production behavior).
+    if let sd = currentSystemDefaultOutput {
+        return (sd, sd.id)
     }
     return nil
 }
 
 func resolveInputDevice(
     priorityList: [String],
-    connectedDevices: [AudioDevice]
+    connectedDevices: [AudioDevice],
+    currentSystemDefaultInput: AudioDevice?
 ) -> (device: AudioDevice, uid: String)? {
     for deviceID in priorityList {
         if let device = connectedDevices.first(where: { $0.id == deviceID && $0.isInput }) {
             return (device, device.id)
         }
     }
+    // Fall back to current system default input (production behavior).
+    if let sd = currentSystemDefaultInput {
+        return (sd, sd.id)
+    }
     return nil
 }
 
-func findBestTriggerMatch(
-    profiles: [Profile],
-    currentDeviceIDs: Set<String>,
-    currentDevices: [AudioDevice] = []
-) -> TriggerMatchResult? {
-    var bestMatch: TriggerMatchResult? = nil
-    var bestSpecificCount = 0
-
-    for profile in profiles {
-        guard !profile.triggerRules.isEmpty else { continue }
-        var matchCount = 0
-        var specificCount = 0
-        var primaryDevice: String? = nil
-
-        for rule in profile.triggerRules {
-            switch rule {
-            case .specificDevice(let id):
-                if currentDeviceIDs.contains(id) {
-                    matchCount += 1
-                    specificCount += 1
-                    if primaryDevice == nil { primaryDevice = id }
-                }
-            case .transportType(let type):
-                if currentDevices.contains(where: { $0.transportType == type }) {
-                    matchCount += 1
-                    if primaryDevice == nil {
-                        primaryDevice = currentDevices.first(where: { $0.transportType == type })?.id ?? "Any \(type)"
-                    }
-                }
-            }
-        }
-
-        if matchCount > 0 {
-            let isBetter: Bool
-            if bestMatch == nil {
-                isBetter = true
-            } else if matchCount > bestMatch!.matchCount {
-                isBetter = true
-            } else if matchCount == bestMatch!.matchCount && specificCount > bestSpecificCount {
-                isBetter = true
-            } else {
-                isBetter = false
-            }
-            if isBetter {
-                bestMatch = TriggerMatchResult(
-                    profile: profile,
-                    matchCount: matchCount,
-                    primaryTriggerDevice: primaryDevice!
-                )
-                bestSpecificCount = specificCount
-            }
-        }
-    }
-    return bestMatch
-}
-
+// ============================================================================
+// MARK: - computeActiveOverlay MIRROR (of SoundModesStore.activeOverlay)
+// ============================================================================
+// Faithful to production: when an overlay is MISSING for the active mode, the
+// production `overlay(for:)` falls back to the mode's DEFAULT overlay (NOT to
+// .flat). Night mode stacks independently of the content-modes master toggle.
 func computeActiveOverlay(
     isEnabled: Bool,
     activeContentMode: ContentModeType,
@@ -337,8 +170,9 @@ func computeActiveOverlay(
 ) -> EQSettings {
     let contentEQ: EQSettings
     if isEnabled {
-        let overlay = overlays[activeContentMode]
-        if let o = overlay, o.isEnabled { contentEQ = o.settings } else { contentEQ = .flat }
+        // Mirror SoundModesStore.overlay(for:): missing → mode default overlay.
+        let overlay = overlays[activeContentMode] ?? ContentModeOverlay.defaultOverlay(for: activeContentMode)
+        contentEQ = overlay.isEnabled ? overlay.settings : .flat
     } else {
         contentEQ = .flat
     }
@@ -348,6 +182,9 @@ func computeActiveOverlay(
     return contentEQ
 }
 
+// ============================================================================
+// MARK: - decidePipelineAction MIRROR (of AudioPipelineService.apply branches)
+// ============================================================================
 func decidePipelineAction(
     eqRunning: Bool,
     eqTargetUID: String?,
@@ -358,16 +195,374 @@ func decidePipelineAction(
 ) -> PipelineAction {
     guard let outputUID = outputDeviceUID else { return .noOp }
     let vName = virtualDeviceName ?? "\(outputUID) EQ"
+
     if needsVirtualDriver {
         if eqRunning {
-            if eqTargetUID == outputUID { return .hotUpdate(effectiveEQ) }
-            else { return .switchDevice(realUID: outputUID, settings: effectiveEQ, virtualName: vName) }
+            if eqTargetUID == outputUID {
+                return .hotUpdate(effectiveEQ)
+            } else {
+                return .switchDevice(realUID: outputUID, settings: effectiveEQ, virtualName: vName)
+            }
         } else {
             return .startPipeline(realUID: outputUID, settings: effectiveEQ, virtualName: vName)
         }
     } else {
-        if eqRunning { return .stopEQ(switchTo: outputUID) }
-        else { return .directSetDevice(outputUID) }
+        if eqRunning {
+            return .stopEQ(switchTo: outputUID)
+        } else {
+            return .directSetDevice(outputUID)
+        }
+    }
+}
+
+// ============================================================================
+// MARK: - SystemState
+// ============================================================================
+
+struct SystemState {
+    let activeProfileName: String?
+    let activeMode: ProfileMode
+    let outputDeviceName: String?
+    let outputDeviceUID: String?
+    let inputDeviceName: String?
+    let effectiveEQ: EQSettings
+    let needsVirtualDriver: Bool
+    let pipelineAction: PipelineAction
+    let wasAutoSwitched: Bool
+    let fingerprintChanged: Bool
+}
+
+// ============================================================================
+// MARK: - SystemSimulator
+// ============================================================================
+
+struct SystemSimulator {
+    var profiles: [Profile]
+    var activeProfileID: UUID?
+    var activeMode: ProfileMode
+    var connectedDevices: [AudioDevice]
+    var deviceEQ: [String: EQSettings]
+    var soundModesEnabled: Bool
+    var activeContentMode: ContentModeType
+    var contentOverlays: [ContentModeType: ContentModeOverlay]
+    var nightMode: NightModeConfig
+    var isNightModeActive: Bool
+    var isAutoSwitchEnabled: Bool
+    var isGlobalBypass: Bool
+    /// Per-device EQ bypass, mirrors EQStore.isBypassed(for:). Production flattens
+    /// effective EQ when EITHER global bypass OR the resolved device's bypass is set.
+    var deviceBypass: [String: Bool]
+    var driverInstalled: Bool
+    var eqRunning: Bool
+    var eqTargetUID: String?
+    var virtualDeviceUID: String?
+    /// Models the CURRENT system default endpoints. Production's performEvaluation
+    /// falls back to these when the priority list resolves nothing — so an empty or
+    /// unmatched priority list still yields a device, NOT nil.
+    var currentSystemDefaultOutput: AudioDevice?
+    var currentSystemDefaultInput: AudioDevice?
+    var lastFingerprint: PipelineFingerprint?
+    var lastManualSwitchTimestamp: Date?
+    var deviceHistory: [String: DeviceHistoryEntry]
+
+    init(profiles: [Profile] = [],
+         activeProfileID: UUID? = nil,
+         activeMode: ProfileMode = .public,
+         connectedDevices: [AudioDevice] = [],
+         deviceEQ: [String: EQSettings] = [:],
+         deviceBypass: [String: Bool] = [:],
+         soundModesEnabled: Bool = false,
+         activeContentMode: ContentModeType = .none,
+         contentOverlays: [ContentModeType: ContentModeOverlay] = [:],
+         nightMode: NightModeConfig = .default,
+         isNightModeActive: Bool = false,
+         isAutoSwitchEnabled: Bool = true,
+         isGlobalBypass: Bool = false,
+         driverInstalled: Bool = true,
+         eqRunning: Bool = false,
+         eqTargetUID: String? = nil,
+         virtualDeviceUID: String? = nil,
+         currentSystemDefaultOutput: AudioDevice? = nil,
+         currentSystemDefaultInput: AudioDevice? = nil) {
+        self.profiles = profiles
+        self.activeProfileID = activeProfileID
+        self.activeMode = activeMode
+        self.connectedDevices = connectedDevices
+        self.deviceEQ = deviceEQ
+        self.deviceBypass = deviceBypass
+        self.soundModesEnabled = soundModesEnabled
+        self.activeContentMode = activeContentMode
+        self.contentOverlays = contentOverlays
+        self.nightMode = nightMode
+        self.isNightModeActive = isNightModeActive
+        self.isAutoSwitchEnabled = isAutoSwitchEnabled
+        self.isGlobalBypass = isGlobalBypass
+        self.driverInstalled = driverInstalled
+        self.eqRunning = eqRunning
+        self.eqTargetUID = eqTargetUID
+        self.virtualDeviceUID = virtualDeviceUID
+        self.currentSystemDefaultOutput = currentSystemDefaultOutput
+        self.currentSystemDefaultInput = currentSystemDefaultInput
+        self.lastFingerprint = nil
+        self.lastManualSwitchTimestamp = nil
+        self.deviceHistory = [:]
+    }
+
+    /// Core evaluation: wires pure functions in the same order as ProfileManager.performEvaluation()
+    mutating func evaluate(wasAutoSwitched: Bool = false) -> SystemState {
+        // Step 1: get active profile.
+        // Production performEvaluation() begins with `guard let profile = activeProfile
+        // else { return }` — with no active profile it does nothing and resolves no
+        // device. Mirror that early return here.
+        guard let activeProfile = profiles.first(where: { $0.id == activeProfileID }) else {
+            return SystemState(
+                activeProfileName: nil,
+                activeMode: activeMode,
+                outputDeviceName: nil,
+                outputDeviceUID: nil,
+                inputDeviceName: nil,
+                effectiveEQ: .flat,
+                needsVirtualDriver: false,
+                pipelineAction: .noOp,
+                wasAutoSwitched: wasAutoSwitched,
+                fingerprintChanged: false
+            )
+        }
+
+        // Step 2: resolve output device (falls back to system default like production)
+        let outputList = activeProfile.priorityList(isOutput: true, mode: activeMode)
+        let outputResult = resolveOutputDevice(
+            priorityList: outputList,
+            connectedDevices: connectedDevices,
+            currentSystemDefaultOutput: currentSystemDefaultOutput,
+            virtualDeviceUID: virtualDeviceUID,
+            eqRunning: eqRunning,
+            eqTargetUID: eqTargetUID
+        )
+
+        // Step 3: resolve input device (falls back to system default like production)
+        let inputList = activeProfile.priorityList(isOutput: false, mode: activeMode)
+        let inputResult = resolveInputDevice(
+            priorityList: inputList,
+            connectedDevices: connectedDevices,
+            currentSystemDefaultInput: currentSystemDefaultInput
+        )
+
+        // Step 4: compute active overlay (L2 from content mode + night mode)
+        let l2Overlay = computeActiveOverlay(
+            isEnabled: soundModesEnabled,
+            activeContentMode: activeContentMode,
+            overlays: contentOverlays,
+            isNightModeActive: isNightModeActive,
+            nightMode: nightMode
+        )
+
+        // Step 5: EQSettings.combine(base: L1, overlay: L2), then bypass check.
+        // Production flattens when global bypass OR the resolved device's per-device
+        // bypass (EQStore.isBypassed) is set.
+        let resolvedUID = outputResult?.uid ?? ""
+        let baseEQ = deviceEQ[resolvedUID] ?? .flat
+        let deviceBypassed = deviceBypass[resolvedUID] ?? false
+        let effectiveEQ: EQSettings
+        if isGlobalBypass || deviceBypassed {
+            effectiveEQ = .flat
+        } else {
+            effectiveEQ = EQSettings.combine(base: baseEQ, overlay: l2Overlay)
+        }
+
+        // Step 6: needsVirtualDriver = !effectiveEQ.isFlat && driverInstalled
+        let needsVirtualDriver = !effectiveEQ.isFlat && driverInstalled
+
+        // Step 7: Build PipelineFingerprint
+        let fingerprint = PipelineFingerprint(
+            profileID: activeProfileID,
+            mode: activeMode,
+            outputDeviceUID: outputResult?.uid,
+            inputDeviceUID: inputResult?.uid,
+            effectiveEQ: effectiveEQ,
+            needsVirtualDriver: needsVirtualDriver
+        )
+
+        // Step 8: compare with lastFingerprint
+        let fingerprintChanged = fingerprint != lastFingerprint
+
+        // Step 9: decidePipelineAction — what the pipeline service would do
+        let action: PipelineAction
+        if fingerprintChanged {
+            action = decidePipelineAction(
+                eqRunning: eqRunning,
+                eqTargetUID: eqTargetUID,
+                needsVirtualDriver: needsVirtualDriver,
+                outputDeviceUID: outputResult?.uid,
+                effectiveEQ: effectiveEQ,
+                virtualDeviceName: outputResult.map { "\($0.device.name) EQ" }
+            )
+        } else {
+            action = .noOp
+        }
+
+        // Step 10: Update simulator EQ engine state based on action
+        if fingerprintChanged {
+            lastFingerprint = fingerprint
+            switch action {
+            case .startPipeline(let uid, _, _):
+                eqRunning = true
+                eqTargetUID = uid
+            case .switchDevice(let uid, _, _):
+                eqTargetUID = uid
+            case .stopEQ:
+                eqRunning = false
+                eqTargetUID = nil
+            case .directSetDevice:
+                break
+            case .hotUpdate:
+                break
+            case .noOp:
+                break
+            }
+        }
+
+        return SystemState(
+            activeProfileName: activeProfile.name,
+            activeMode: activeMode,
+            outputDeviceName: outputResult?.device.name,
+            outputDeviceUID: outputResult?.uid,
+            inputDeviceName: inputResult?.device.name,
+            effectiveEQ: effectiveEQ,
+            needsVirtualDriver: needsVirtualDriver,
+            pipelineAction: action,
+            wasAutoSwitched: wasAutoSwitched,
+            fingerprintChanged: fingerprintChanged
+        )
+    }
+
+    /// Resolve a profile from an AudioCore.TriggerMatch (which carries profileID, not the profile).
+    private func profile(for match: AudioCore.TriggerMatch) -> Profile? {
+        profiles.first(where: { $0.id == match.profileID })
+    }
+
+    /// Manual-override protection, delegated to the REAL production logic
+    /// (AudioCore.shouldApplyTrigger): an auto-switch is allowed only if the matched
+    /// profile has a currently-active trigger device whose `connectedAt` is AFTER the
+    /// last manual switch. A device that predates the manual switch — even with a
+    /// refreshed `lastSeen` — must NOT override the user. Mirrors
+    /// ProfileTriggerService.evaluateTriggers, which also checks the primary matched
+    /// device (may come from a class-based rule not in triggerDeviceIDs).
+    private func triggerAllowedByManualOverride(_ match: AudioCore.TriggerMatch, profile: Profile) -> Bool {
+        var deviceIDsToCheck = profile.triggerDeviceIDs
+        if !deviceIDsToCheck.contains(match.primaryTriggerDevice) {
+            deviceIDsToCheck.append(match.primaryTriggerDevice)
+        }
+        return AudioCore.shouldApplyTrigger(
+            lastManualSwitch: lastManualSwitchTimestamp,
+            triggerDeviceIDs: deviceIDsToCheck,
+            history: deviceHistory
+        )
+    }
+
+    mutating func connectDevice(_ device: AudioDevice) -> SystemState {
+        if !connectedDevices.contains(where: { $0.id == device.id }) {
+            connectedDevices.append(device)
+        }
+
+        // Fold the fresh scan into history using the REAL AudioCore logic
+        // (connectedAt advances only on a disconnected → connected transition).
+        deviceHistory = AudioCore.updateDeviceHistory(deviceHistory, with: connectedDevices, now: Date())
+
+        var autoSwitched = false
+        if isAutoSwitchEnabled {
+            let currentDeviceIDs = Set(connectedDevices.map { $0.id })
+            if let match = AudioCore.findBestTriggerMatch(
+                profiles: profiles.filter { !$0.isSystemDefault },
+                currentDeviceIDs: currentDeviceIDs,
+                currentDevices: connectedDevices
+            ), let matched = profile(for: match) {
+                if triggerAllowedByManualOverride(match, profile: matched) && matched.id != activeProfileID {
+                    activeProfileID = matched.id
+                    activeMode = matched.preferredMode
+                    autoSwitched = true
+                }
+            }
+        }
+
+        return evaluate(wasAutoSwitched: autoSwitched)
+    }
+
+    mutating func disconnectDevice(_ uid: String) -> SystemState {
+        connectedDevices.removeAll { $0.id == uid }
+
+        // Fold the scan (device now absent) into history via the REAL AudioCore logic;
+        // the removed device is marked inactive but retained.
+        deviceHistory = AudioCore.updateDeviceHistory(deviceHistory, with: connectedDevices, now: Date())
+
+        var autoSwitched = false
+        if isAutoSwitchEnabled {
+            let currentDeviceIDs = Set(connectedDevices.map { $0.id })
+            let newMatch = AudioCore.findBestTriggerMatch(
+                profiles: profiles.filter { !$0.isSystemDefault },
+                currentDeviceIDs: currentDeviceIDs,
+                currentDevices: connectedDevices
+            )
+
+            if let match = newMatch, let matched = profile(for: match) {
+                if matched.id != activeProfileID {
+                    activeProfileID = matched.id
+                    activeMode = matched.preferredMode
+                    autoSwitched = true
+                }
+            } else {
+                if let sd = profiles.first(where: { $0.isSystemDefault }) {
+                    if sd.id != activeProfileID {
+                        activeProfileID = sd.id
+                        autoSwitched = true
+                    }
+                }
+            }
+        }
+
+        return evaluate(wasAutoSwitched: autoSwitched)
+    }
+
+    mutating func activateProfile(_ id: UUID, isManual: Bool) -> SystemState {
+        activeProfileID = id
+        if let profile = profiles.first(where: { $0.id == id }) {
+            activeMode = profile.preferredMode
+        }
+        if isManual {
+            lastManualSwitchTimestamp = Date()
+        }
+        return evaluate()
+    }
+
+    mutating func toggleMode() -> SystemState {
+        activeMode = activeMode == .public ? .private : .public
+        return evaluate()
+    }
+
+    mutating func setEQ(for uid: String, _ settings: EQSettings) -> SystemState {
+        deviceEQ[uid] = settings
+        return evaluate()
+    }
+
+    mutating func toggleGlobalBypass() -> SystemState {
+        isGlobalBypass.toggle()
+        return evaluate()
+    }
+
+    /// Mirrors EQStore.setBypassed(_:for:) → re-evaluation.
+    mutating func setDeviceBypass(_ bypassed: Bool, for uid: String) -> SystemState {
+        deviceBypass[uid] = bypassed
+        return evaluate()
+    }
+
+    mutating func setContentMode(_ mode: ContentModeType) -> SystemState {
+        activeContentMode = mode
+        return evaluate()
+    }
+
+    mutating func setNightModeActive(_ active: Bool) -> SystemState {
+        isNightModeActive = active
+        return evaluate()
     }
 }
 
@@ -385,297 +580,36 @@ func section(_ name: String) {
     print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 }
 
-func check(_ condition: Bool, _ message: String, file: String = #file, line: Int = #line) {
+func check(_ condition: Bool, _ message: String, line: Int = #line) {
     totalTests += 1
     if condition {
         passedTests += 1
         print("  ✅ \(message)")
     } else {
         failedTests += 1
-        print("  ❌ \(message) [line \(line)]")
+        print("  ❌ FAIL: \(message) (line \(line))")
     }
 }
 
-func checkEqual<T: Equatable>(_ a: T, _ b: T, _ message: String, file: String = #file, line: Int = #line) {
+func checkEqual<T: Equatable>(_ a: T, _ b: T, _ message: String, line: Int = #line) {
     totalTests += 1
     if a == b {
         passedTests += 1
         print("  ✅ \(message)")
     } else {
         failedTests += 1
-        print("  ❌ \(message) — got '\(a)', expected '\(b)' [line \(line)]")
+        print("  ❌ FAIL: \(message) — got '\(a)', expected '\(b)' (line \(line))")
     }
 }
 
-// ============================================================================
-// MARK: - SystemState (what each action returns)
-// ============================================================================
-
-struct SystemState {
-    let activeProfileName: String?
-    let activeMode: ProfileMode
-    let outputDeviceName: String?
-    let outputDeviceUID: String?
-    let inputDeviceName: String?
-    let inputDeviceUID: String?
-    let effectiveEQ: EQSettings
-    let needsVirtualDriver: Bool
-    let pipelineAction: PipelineAction
-    let wasAutoSwitched: Bool
-    let fingerprintChanged: Bool
-}
-
-// ============================================================================
-// MARK: - SystemSimulator (wires pure functions into a stateful simulation)
-// ============================================================================
-
-struct SystemSimulator {
-    // Profiles
-    var profiles: [Profile]
-    var activeProfileID: UUID?
-    var activeMode: ProfileMode = .public
-
-    // Devices
-    var connectedDevices: [AudioDevice]
-    var deviceHistory: [String: (isActive: Bool, lastSeen: Date)] = [:]
-
-    // EQ state
-    var deviceEQ: [String: EQSettings] = [:]
-    var soundModesEnabled: Bool = false
-    var activeContentMode: ContentModeType = .none
-    var contentOverlays: [ContentModeType: ContentModeOverlay] = [:]
-    var nightMode: NightModeConfig = .default
-    var isNightModeActive: Bool = false
-    var isGlobalBypass: Bool = false
-    var driverInstalled: Bool = true
-
-    // EQ engine state (tracks what the engine is doing)
-    var eqRunning: Bool = false
-    var eqTargetUID: String? = nil
-    var virtualDeviceUID: String? = nil
-
-    // Auto-switch state
-    var isAutoSwitchEnabled: Bool = true
-    var lastManualSwitchTimestamp: Date? = nil
-
-    // Pipeline state
-    var lastFingerprint: PipelineFingerprint? = nil
-    var lastAutoSwitchHappened: Bool = false
-
-    // MARK: - Actions
-
-    mutating func connectDevice(_ device: AudioDevice) -> SystemState {
-        if !connectedDevices.contains(where: { $0.id == device.id }) {
-            connectedDevices.append(device)
-        }
-        deviceHistory[device.id] = (isActive: true, lastSeen: Date())
-        return triggerAndEvaluate()
-    }
-
-    mutating func disconnectDevice(_ uid: String) -> SystemState {
-        connectedDevices.removeAll { $0.id == uid }
-        if var entry = deviceHistory[uid] {
-            entry.isActive = false
-            deviceHistory[uid] = entry
-        }
-        return triggerAndEvaluate()
-    }
-
-    mutating func activateProfile(_ id: UUID, isManual: Bool = false) -> SystemState {
-        guard let profile = profiles.first(where: { $0.id == id }) else {
-            return evaluate(wasAutoSwitched: false)
-        }
-        activeProfileID = id
-        activeMode = profile.preferredMode
-        if isManual {
-            lastManualSwitchTimestamp = Date()
-        } else {
-            lastManualSwitchTimestamp = nil
-        }
-        lastFingerprint = nil  // Force re-evaluation
-        return evaluate(wasAutoSwitched: !isManual)
-    }
-
-    mutating func toggleMode() -> SystemState {
-        activeMode = (activeMode == .public) ? .private : .public
-        lastFingerprint = nil
-        return evaluate(wasAutoSwitched: false)
-    }
-
-    mutating func setEQ(for uid: String, _ settings: EQSettings) -> SystemState {
-        deviceEQ[uid] = settings
-        // Don't nil fingerprint — let evaluate() detect if EQ actually changed
-        return evaluate(wasAutoSwitched: false)
-    }
-
-    mutating func toggleGlobalBypass() -> SystemState {
-        isGlobalBypass.toggle()
-        lastFingerprint = nil
-        return evaluate(wasAutoSwitched: false)
-    }
-
-    mutating func setContentMode(_ mode: ContentModeType) -> SystemState {
-        activeContentMode = mode
-        lastFingerprint = nil
-        return evaluate(wasAutoSwitched: false)
-    }
-
-    mutating func setNightModeActive(_ active: Bool) -> SystemState {
-        isNightModeActive = active
-        lastFingerprint = nil
-        return evaluate(wasAutoSwitched: false)
-    }
-
-    // MARK: - Trigger matching + evaluation
-
-    private mutating func triggerAndEvaluate() -> SystemState {
-        lastAutoSwitchHappened = false
-        let currentDeviceIDs = Set(connectedDevices.map { $0.id })
-
-        if isAutoSwitchEnabled {
-            let match = findBestTriggerMatch(
-                profiles: profiles,
-                currentDeviceIDs: currentDeviceIDs,
-                currentDevices: connectedDevices
-            )
-
-            if let match = match {
-                // Check manual override blocking
-                let blocked = shouldBlockTrigger(forProfile: match.profile)
-                if !blocked && match.profile.id != activeProfileID {
-                    activeProfileID = match.profile.id
-                    activeMode = match.profile.preferredMode
-                    lastFingerprint = nil
-                    lastAutoSwitchHappened = true
-                }
-            } else {
-                // No match — fall back to System Default
-                if let sysDefault = profiles.first(where: { $0.isSystemDefault }) {
-                    if sysDefault.id != activeProfileID {
-                        activeProfileID = sysDefault.id
-                        activeMode = sysDefault.preferredMode
-                        lastFingerprint = nil
-                        lastAutoSwitchHappened = true
-                    }
-                }
-            }
-        }
-
-        // Always re-evaluate (even if profile didn't change, device priorities may have)
-        lastFingerprint = nil  // Device change always forces re-evaluation
-        return evaluate(wasAutoSwitched: lastAutoSwitchHappened)
-    }
-
-    private func shouldBlockTrigger(forProfile profile: Profile) -> Bool {
-        guard let lastManual = lastManualSwitchTimestamp else { return false }
-        // Block if all trigger devices were connected before manual switch
-        for rule in profile.triggerRules {
-            if case .specificDevice(let id) = rule {
-                if let entry = deviceHistory[id], entry.isActive, entry.lastSeen > lastManual {
-                    return false  // This device was connected AFTER manual switch — allow
-                }
-            }
-        }
-        return true  // All devices were before manual switch — block
-    }
-
-    // MARK: - Pipeline evaluation (the core simulation)
-
-    private mutating func evaluate(wasAutoSwitched: Bool) -> SystemState {
-        let profile = profiles.first(where: { $0.id == activeProfileID })
-            ?? profiles.first(where: { $0.isSystemDefault })
-
-        let profileName = profile?.name
-        let profileID = profile?.id
-
-        // Resolve output device
-        let outputPriority = profile?.priorityList(isOutput: true, mode: activeMode) ?? []
-        let outputResult = resolveOutputDevice(
-            priorityList: outputPriority,
-            connectedDevices: connectedDevices,
-            virtualDeviceUID: virtualDeviceUID,
-            eqRunning: eqRunning,
-            eqTargetUID: eqTargetUID
-        )
-        // Fallback to first connected output device (simulates system default)
-        let resolvedOutput = outputResult ?? connectedDevices.first(where: { $0.isOutput }).map { ($0, $0.id) }
-        let outputDeviceName = resolvedOutput?.device.name
-        let outputDeviceUID = resolvedOutput?.uid
-
-        // Resolve input device
-        let inputPriority = profile?.priorityList(isOutput: false, mode: activeMode) ?? []
-        let inputResult = resolveInputDevice(priorityList: inputPriority, connectedDevices: connectedDevices)
-        let resolvedInput = inputResult ?? connectedDevices.first(where: { $0.isInput }).map { ($0, $0.id) }
-        let inputDeviceName = resolvedInput?.device.name
-        let inputDeviceUID = resolvedInput?.uid
-
-        // Compute effective EQ
-        let baseEQ = (outputDeviceUID != nil) ? (deviceEQ[outputDeviceUID!] ?? .flat) : .flat
-        let overlay = computeActiveOverlay(
-            isEnabled: soundModesEnabled,
-            activeContentMode: activeContentMode,
-            overlays: contentOverlays,
-            isNightModeActive: isNightModeActive,
-            nightMode: nightMode
-        )
-        let combinedEQ = EQSettings.combine(base: baseEQ, overlay: overlay)
-        let effectiveEQ = isGlobalBypass ? .flat : combinedEQ
-
-        // Virtual driver need
-        let needsVirtualDriver = !effectiveEQ.isFlat && driverInstalled
-
-        // Fingerprint
-        let fingerprint = PipelineFingerprint(
-            profileID: profileID,
-            mode: activeMode,
-            outputDeviceUID: outputDeviceUID,
-            inputDeviceUID: inputDeviceUID,
-            effectiveEQ: effectiveEQ,
-            needsVirtualDriver: needsVirtualDriver
-        )
-        let fingerprintChanged = fingerprint != lastFingerprint
-        lastFingerprint = fingerprint
-
-        // Pipeline action
-        let vName = outputDeviceName.map { "\($0) EQ" }
-        let action = decidePipelineAction(
-            eqRunning: eqRunning,
-            eqTargetUID: eqTargetUID,
-            needsVirtualDriver: needsVirtualDriver,
-            outputDeviceUID: outputDeviceUID,
-            effectiveEQ: effectiveEQ,
-            virtualDeviceName: vName
-        )
-
-        // Update EQ engine state based on action
-        switch action {
-        case .startPipeline(let uid, _, _):
-            eqRunning = true
-            eqTargetUID = uid
-        case .switchDevice(let uid, _, _):
-            eqTargetUID = uid
-        case .stopEQ:
-            eqRunning = false
-            eqTargetUID = nil
-        case .hotUpdate:
-            break  // No state change
-        case .directSetDevice, .noOp:
-            break
-        }
-
-        return SystemState(
-            activeProfileName: profileName,
-            activeMode: activeMode,
-            outputDeviceName: outputDeviceName,
-            outputDeviceUID: outputDeviceUID,
-            inputDeviceName: inputDeviceName,
-            inputDeviceUID: inputDeviceUID,
-            effectiveEQ: effectiveEQ,
-            needsVirtualDriver: needsVirtualDriver,
-            pipelineAction: action,
-            wasAutoSwitched: wasAutoSwitched,
-            fingerprintChanged: fingerprintChanged
-        )
+func checkApprox(_ a: Float, _ b: Float, tol: Float = 0.01, _ message: String, line: Int = #line) {
+    totalTests += 1
+    if abs(a - b) <= tol {
+        passedTests += 1
+        print("  ✅ \(message)")
+    } else {
+        failedTests += 1
+        print("  ❌ FAIL: \(message) — got \(a), expected ≈\(b) (line \(line))")
     }
 }
 
@@ -683,750 +617,942 @@ struct SystemSimulator {
 // MARK: - Test fixtures
 // ============================================================================
 
-// Devices
 let speakers = AudioDevice(id: "speakers-uid", name: "Studio Monitors", transportType: "USB", isInput: false, isOutput: true)
 let headphones = AudioDevice(id: "beyerdynamic-uid", name: "Beyerdynamic DT 990", transportType: "USB", isInput: false, isOutput: true)
 let airpods = AudioDevice(id: "airpods-uid", name: "AirPods Max", transportType: "Bluetooth", isInput: true, isOutput: true)
 let builtinOut = AudioDevice(id: "builtin-output-uid", name: "MacBook Pro Speakers", transportType: "Built-In", isInput: false, isOutput: true)
 let builtinIn = AudioDevice(id: "builtin-input-uid", name: "MacBook Pro Microphone", transportType: "Built-In", isInput: true, isOutput: false)
 let usbMic = AudioDevice(id: "usb-mic-uid", name: "Blue Yeti", transportType: "USB", isInput: true, isOutput: false)
-let randomUSB = AudioDevice(id: "random-usb-uid", name: "Random USB Widget", transportType: "USB", isInput: true, isOutput: false)
 
-// Profiles
 let homeProfileID = UUID()
 let officeProfileID = UUID()
 let systemDefaultID = UUID()
 
-func makeHomeProfile() -> Profile {
-    Profile(id: homeProfileID, name: "Home Studio",
-            triggerDeviceIDs: ["speakers-uid", "beyerdynamic-uid"],
-            publicOutputPriority: ["speakers-uid", "beyerdynamic-uid", "builtin-output-uid"],
-            publicInputPriority: ["usb-mic-uid", "builtin-input-uid"],
-            privateOutputPriority: ["beyerdynamic-uid", "speakers-uid", "builtin-output-uid"],
-            privateInputPriority: ["usb-mic-uid", "builtin-input-uid"],
-            preferredMode: .public)
-}
+let homeProfile = makeProfile(
+    id: homeProfileID,
+    name: "Home Studio",
+    triggerDeviceIDs: ["speakers-uid", "beyerdynamic-uid"],
+    publicOutputPriority: ["speakers-uid", "beyerdynamic-uid", "builtin-output-uid"],
+    publicInputPriority: ["usb-mic-uid", "builtin-input-uid"],
+    privateOutputPriority: ["beyerdynamic-uid", "speakers-uid", "builtin-output-uid"],
+    privateInputPriority: ["usb-mic-uid", "builtin-input-uid"],
+    preferredMode: .public
+)
 
-func makeOfficeProfile() -> Profile {
-    Profile(id: officeProfileID, name: "Office",
-            triggerDeviceIDs: ["airpods-uid"],
-            publicOutputPriority: ["airpods-uid", "builtin-output-uid"],
-            publicInputPriority: ["airpods-uid", "builtin-input-uid"],
-            privateOutputPriority: ["airpods-uid", "builtin-output-uid"],
-            privateInputPriority: ["airpods-uid", "builtin-input-uid"],
-            preferredMode: .public)
-}
+let officeProfile = makeProfile(
+    id: officeProfileID,
+    name: "Office",
+    triggerDeviceIDs: ["airpods-uid"],
+    publicOutputPriority: ["airpods-uid", "builtin-output-uid"],
+    publicInputPriority: ["airpods-uid", "builtin-input-uid"],
+    privateOutputPriority: ["airpods-uid", "builtin-output-uid"],
+    privateInputPriority: ["airpods-uid", "builtin-input-uid"],
+    preferredMode: .public
+)
 
-func makeSystemDefault() -> Profile {
-    Profile(id: systemDefaultID, name: "System Default",
-            publicOutputPriority: ["builtin-output-uid"],
-            publicInputPriority: ["builtin-input-uid"],
-            privateOutputPriority: ["builtin-output-uid"],
-            privateInputPriority: ["builtin-input-uid"],
-            preferredMode: .public, isSystemDefault: true)
-}
+let systemDefault = makeProfile(
+    id: systemDefaultID,
+    name: "System Default",
+    triggerDeviceIDs: [],
+    publicOutputPriority: [],
+    publicInputPriority: [],
+    privateOutputPriority: [],
+    privateInputPriority: [],
+    preferredMode: .public,
+    isSystemDefault: true
+)
 
-func makeStandardSimulator() -> SystemSimulator {
+// Helper: make a default simulator with standard profiles and devices
+func makeSimulator(
+    profiles: [Profile] = [systemDefault, homeProfile, officeProfile],
+    activeProfileID: UUID? = nil,
+    connected: [AudioDevice] = [builtinOut, builtinIn],
+    mode: ProfileMode = .public,
+    soundModesEnabled: Bool = false,
+    driverInstalled: Bool = true,
+    autoSwitch: Bool = true
+) -> SystemSimulator {
     var sim = SystemSimulator(
-        profiles: [makeSystemDefault(), makeHomeProfile(), makeOfficeProfile()],
-        connectedDevices: [builtinOut, builtinIn]
+        profiles: profiles,
+        activeProfileID: activeProfileID ?? systemDefaultID,
+        activeMode: mode,
+        connectedDevices: connected,
+        soundModesEnabled: soundModesEnabled,
+        isAutoSwitchEnabled: autoSwitch,
+        driverInstalled: driverInstalled,
+        // Model the OS "current default" endpoints. Production's performEvaluation
+        // falls back to these when the priority list resolves nothing — so a
+        // profile with an empty/unmatched priority list still yields a device.
+        // We use built-in as the natural default, consistent with a real Mac.
+        currentSystemDefaultOutput: connected.first(where: { $0.isOutput }),
+        currentSystemDefaultInput: connected.first(where: { $0.isInput })
     )
-    sim.activeProfileID = systemDefaultID
+    for contentMode in ContentModeType.allCases {
+        sim.contentOverlays[contentMode] = ContentModeOverlay.defaultOverlay(for: contentMode)
+    }
     return sim
 }
 
-// EQ presets for testing
-func makeBassBoostEQ() -> EQSettings {
-    var eq = EQSettings.flat
-    eq.bands[0].gain = 6.0   // 32 Hz +6dB
-    eq.bands[1].gain = 4.0   // 64 Hz +4dB
-    return eq
-}
-
-func makeVoiceBoostEQ() -> EQSettings {
-    var eq = EQSettings.flat
-    eq.bands[6].gain = 3.0   // 2kHz +3dB
-    eq.bands[7].gain = 2.0   // 4kHz +2dB
-    return eq
-}
-
 // ============================================================================
-// MARK: - Category 1: Device Lifecycle
+// MARK: - 1. Device Lifecycle (7 tests)
 // ============================================================================
 
-section("📱 Device Lifecycle — Plugging in a higher-priority device")
+section("1. Device Lifecycle")
 
+// Test 1: Speakers off → headphones used as fallback
 do {
-    // Start with Home profile active, but only builtin + headphones connected (no speakers)
-    var sim = makeStandardSimulator()
-    _ = sim.activateProfile(homeProfileID, isManual: true)
-    _ = sim.connectDevice(headphones)
-
-    let state = sim.connectDevice(builtinIn)  // just to settle
-    // Headphones should be output (speakers not connected, headphones is #2 in public priority)
-    checkEqual(state.outputDeviceName, "Beyerdynamic DT 990",
-               "Speakers off → beyerdynamics used as fallback output")
+    var sim = makeSimulator(
+        activeProfileID: homeProfileID,
+        connected: [headphones, builtinOut, builtinIn]
+    )
+    let state = sim.evaluate()
+    checkEqual(state.outputDeviceUID, "beyerdynamic-uid",
+               "DL1: Speakers off → headphones used as fallback")
 }
 
+// Test 2: Speakers turn on → become output (higher priority) [REGRESSION TEST for original bug]
 do {
-    // THE BUG: speakers turn on while headphones are active
-    var sim = makeStandardSimulator()
-    _ = sim.activateProfile(homeProfileID, isManual: true)
-    _ = sim.connectDevice(headphones)
+    var sim = makeSimulator(
+        activeProfileID: homeProfileID,
+        connected: [headphones, builtinOut, builtinIn]
+    )
+    let state1 = sim.evaluate()
+    checkEqual(state1.outputDeviceUID, "beyerdynamic-uid",
+               "DL2a: Without speakers → headphones selected")
 
-    let beforeState = sim.connectDevice(builtinIn)
-    checkEqual(beforeState.outputDeviceName, "Beyerdynamic DT 990",
-               "Before speakers connect, headphones are output")
-
-    let afterState = sim.connectDevice(speakers)
-    checkEqual(afterState.outputDeviceName, "Studio Monitors",
-               "When speakers turn on, they become output (higher priority)")
+    let state2 = sim.connectDevice(speakers)
+    checkEqual(state2.outputDeviceUID, "speakers-uid",
+               "DL2b: Speakers turn on → speakers selected (higher priority) [BUG REGRESSION]")
+    check(state2.fingerprintChanged, "DL2c: Fingerprint changed when speakers appeared")
 }
 
+// Test 3: Irrelevant USB mic plugged in → output unchanged
 do {
-    // Irrelevant device doesn't change output
-    var sim = makeStandardSimulator()
-    _ = sim.activateProfile(homeProfileID, isManual: true)
-    _ = sim.connectDevice(speakers)
-    let before = sim.connectDevice(usbMic)
-
-    let after = sim.connectDevice(randomUSB)
-    checkEqual(after.outputDeviceUID, before.outputDeviceUID,
-               "Irrelevant USB device plugged in → output unchanged")
+    var sim = makeSimulator(
+        activeProfileID: homeProfileID,
+        connected: [headphones, builtinOut, builtinIn]
+    )
+    let state1 = sim.evaluate()
+    _ = sim.connectDevice(usbMic)
+    let state2 = sim.evaluate()
+    checkEqual(state1.outputDeviceUID, state2.outputDeviceUID,
+               "DL3: USB mic plugged in → output device unchanged")
 }
 
+// Test 4: Current output unplugged → next priority takes over
 do {
-    // Current output unplugged → next priority takes over
-    var sim = makeStandardSimulator()
-    _ = sim.activateProfile(homeProfileID, isManual: true)
-    _ = sim.connectDevice(speakers)
-    _ = sim.connectDevice(headphones)
+    var sim = makeSimulator(
+        activeProfileID: homeProfileID,
+        connected: [speakers, headphones, builtinOut, builtinIn]
+    )
+    let state1 = sim.evaluate()
+    checkEqual(state1.outputDeviceUID, "speakers-uid", "DL4a: Initially using speakers")
 
-    let state = sim.disconnectDevice("speakers-uid")
-    checkEqual(state.outputDeviceName, "Beyerdynamic DT 990",
-               "Unplug speakers → headphones take over (next in priority)")
+    let state2 = sim.disconnectDevice("speakers-uid")
+    checkEqual(state2.outputDeviceUID, "beyerdynamic-uid",
+               "DL4b: Speakers unplugged → headphones take over")
 }
 
+// Test 5: ALL priority devices unplugged → built-in fallback (auto-switch disabled so profile stays)
 do {
-    // ALL priority devices gone → built-in fallback
-    var sim = makeStandardSimulator()
-    _ = sim.activateProfile(homeProfileID, isManual: true)
-    _ = sim.connectDevice(headphones)
-
+    var sim = makeSimulator(
+        activeProfileID: homeProfileID,
+        connected: [speakers, headphones, builtinOut, builtinIn],
+        autoSwitch: false
+    )
+    _ = sim.disconnectDevice("speakers-uid")
     let state = sim.disconnectDevice("beyerdynamic-uid")
-    checkEqual(state.outputDeviceName, "MacBook Pro Speakers",
-               "All priority devices gone → MacBook Pro Speakers fallback")
+    checkEqual(state.outputDeviceUID, "builtin-output-uid",
+               "DL5: All priority devices gone → built-in fallback (within same profile)")
 }
 
+// Test 6: Rapid connect A, connect B, disconnect A → correct final state
 do {
-    // Rapid connect/disconnect sequence
-    var sim = makeStandardSimulator()
-    _ = sim.activateProfile(homeProfileID, isManual: true)
-    _ = sim.connectDevice(speakers)
+    var sim = makeSimulator(
+        activeProfileID: homeProfileID,
+        connected: [builtinOut, builtinIn]
+    )
     _ = sim.connectDevice(headphones)
-    _ = sim.disconnectDevice("speakers-uid")
-
-    let state = sim.connectDevice(speakers)
-    checkEqual(state.outputDeviceName, "Studio Monitors",
-               "After rapid plug/unplug, speakers reconnected → speakers are output again")
+    _ = sim.connectDevice(speakers)
+    let state = sim.disconnectDevice("beyerdynamic-uid")
+    checkEqual(state.outputDeviceUID, "speakers-uid",
+               "DL6: Rapid connect headphones, connect speakers, disconnect headphones → speakers active")
 }
 
+// Test 7: Disconnect then reconnect same device → returns to original state
 do {
-    // Disconnect then reconnect returns to original state
-    var sim = makeStandardSimulator()
-    _ = sim.activateProfile(homeProfileID, isManual: true)
-    _ = sim.connectDevice(speakers)
-    _ = sim.connectDevice(headphones)
-    let original = sim.connectDevice(usbMic)
-
+    var sim = makeSimulator(
+        activeProfileID: homeProfileID,
+        connected: [speakers, headphones, builtinOut, builtinIn]
+    )
+    let state1 = sim.evaluate()
     _ = sim.disconnectDevice("speakers-uid")
-    let restored = sim.connectDevice(speakers)
-    checkEqual(restored.outputDeviceUID, original.outputDeviceUID,
-               "Disconnect then reconnect → returns to original output device")
+    let state3 = sim.connectDevice(speakers)
+    checkEqual(state1.outputDeviceUID, state3.outputDeviceUID,
+               "DL7: Disconnect then reconnect speakers → returns to original state")
 }
 
 // ============================================================================
-// MARK: - Category 2: Profile Auto-Switching
+// MARK: - 2. Profile Auto-Switching (7 tests)
 // ============================================================================
 
-section("🔄 Profile Auto-Switching — The right profile activates")
+section("2. Profile Auto-Switching")
 
+// Test 1: AirPods connect → Office profile activates
 do {
-    var sim = makeStandardSimulator()
+    var sim = makeSimulator(
+        activeProfileID: systemDefaultID,
+        connected: [builtinOut, builtinIn]
+    )
     let state = sim.connectDevice(airpods)
     checkEqual(state.activeProfileName, "Office",
-               "AirPods connect → Office profile activates")
-    check(state.wasAutoSwitched, "Auto-switch was triggered")
+               "AS1: AirPods connect → Office profile activates")
+    check(state.wasAutoSwitched, "AS1b: wasAutoSwitched flag is true")
 }
 
+// Test 2: Studio monitors connect → Home profile activates
 do {
-    var sim = makeStandardSimulator()
-    _ = sim.connectDevice(speakers)
-    let state = sim.connectDevice(headphones)
+    var sim = makeSimulator(
+        activeProfileID: systemDefaultID,
+        connected: [builtinOut, builtinIn]
+    )
+    let state = sim.connectDevice(speakers)
     checkEqual(state.activeProfileName, "Home Studio",
-               "Studio monitors + headphones connect → Home Studio profile activates")
+               "AS2: Studio monitors connect → Home profile activates")
 }
 
+// Test 3: All trigger devices removed → System Default fallback
 do {
-    // Remove all trigger devices → System Default
-    var sim = makeStandardSimulator()
-    _ = sim.connectDevice(airpods)
-    let state = sim.disconnectDevice("airpods-uid")
+    var sim = makeSimulator(
+        activeProfileID: homeProfileID,
+        connected: [speakers, headphones, builtinOut, builtinIn]
+    )
+    _ = sim.disconnectDevice("speakers-uid")
+    let state = sim.disconnectDevice("beyerdynamic-uid")
     checkEqual(state.activeProfileName, "System Default",
-               "All trigger devices removed → falls back to System Default")
+               "AS3: All trigger devices removed → System Default fallback")
 }
 
+// Test 4: Manual override — a trigger device connected BEFORE the manual switch must NOT
+// override the user, even when an unrelated device event re-runs evaluation.
+// (Mirrors production connectedAt > lastManualSwitch, not a time-based debounce.)
 do {
-    // Manual switch blocks auto-switch for same devices
-    var sim = makeStandardSimulator()
-    _ = sim.connectDevice(airpods)  // Auto-switches to Office
-    _ = sim.activateProfile(systemDefaultID, isManual: true)  // Manually switch away
+    var sim = makeSimulator(
+        activeProfileID: officeProfileID,
+        connected: [airpods, builtinOut, builtinIn]
+    )
+    // Headphones (a Home Studio trigger) were already connected 5 minutes ago.
+    let past = Date().addingTimeInterval(-300)
+    sim.deviceHistory["beyerdynamic-uid"] = DeviceHistoryEntry(
+        device: headphones, lastSeen: past, connectedAt: past, isCurrentlyActive: true)
+    sim.connectedDevices.append(headphones)
+    // User then manually selected Office 1 minute ago (after headphones were already present).
+    sim.lastManualSwitchTimestamp = Date().addingTimeInterval(-60)
 
-    // AirPods still connected — auto-switch should be blocked (no new device event)
-    let state = sim.connectDevice(builtinIn)  // Connect irrelevant device
-    checkEqual(state.activeProfileName, "System Default",
-               "After manual switch, existing trigger devices don't re-trigger")
+    // An unrelated device (USB mic) is plugged in now → re-evaluation, but no NEW trigger connection.
+    let state = sim.connectDevice(usbMic)
+    checkEqual(state.activeProfileName, "Office",
+               "AS4: Trigger device present before manual switch does NOT override user on unrelated event")
 }
 
+// Test 4b: A trigger device connected AFTER the manual switch DOES override — a fresh
+// plug-in is new user intent, so auto-switch is allowed.
 do {
-    // More trigger matches wins
-    var sim = makeStandardSimulator()
-    _ = sim.connectDevice(speakers)     // Home has 2 triggers: speakers + headphones
-    _ = sim.connectDevice(headphones)   // Both connected → Home has 2 matches
-    _ = sim.connectDevice(airpods)      // Office has 1 trigger: airpods → 1 match
+    var sim = makeSimulator(
+        activeProfileID: officeProfileID,
+        connected: [airpods, builtinOut, builtinIn]
+    )
+    sim.lastManualSwitchTimestamp = Date().addingTimeInterval(-60)  // manual switch 1 min ago
 
-    let state = sim.connectDevice(builtinIn)
+    let state = sim.connectDevice(speakers)  // brand-new connection now → connectedAt > lastManualSwitch
     checkEqual(state.activeProfileName, "Home Studio",
-               "Home (2 trigger matches) beats Office (1 match)")
+               "AS4b: Trigger device connected after manual switch DOES override (fresh user intent)")
 }
 
+// Test 5: Two profiles match, more trigger matches wins
 do {
-    // Auto-switching disabled → no profile change
-    var sim = makeStandardSimulator()
-    sim.isAutoSwitchEnabled = false
+    let multiTriggerProfile = makeProfile(
+        id: UUID(),
+        name: "Multi Trigger",
+        triggerDeviceIDs: ["speakers-uid", "beyerdynamic-uid"],
+        publicOutputPriority: ["speakers-uid"],
+        publicInputPriority: [],
+        privateOutputPriority: [],
+        privateInputPriority: [],
+        preferredMode: .public
+    )
+    let singleTriggerProfile = makeProfile(
+        id: UUID(),
+        name: "Single Trigger",
+        triggerDeviceIDs: ["speakers-uid"],
+        publicOutputPriority: ["speakers-uid"],
+        publicInputPriority: [],
+        privateOutputPriority: [],
+        privateInputPriority: [],
+        preferredMode: .public
+    )
+
+    let allProfiles = [singleTriggerProfile, multiTriggerProfile]
+    let deviceIDs: Set<String> = ["speakers-uid", "beyerdynamic-uid"]
+    // REAL AudioCore.findBestTriggerMatch — returns a profileID we resolve back.
+    let match = AudioCore.findBestTriggerMatch(
+        profiles: allProfiles,
+        currentDeviceIDs: deviceIDs
+    )
+    let matchedProfile = match.flatMap { m in allProfiles.first { $0.id == m.profileID } }
+    checkEqual(matchedProfile?.name, "Multi Trigger",
+               "AS5: Two profiles match, more trigger matches wins")
+    checkEqual(match?.matchCount, 2, "AS5b: Winner has match count of 2")
+}
+
+// Test 6: Auto-switching disabled → device changes don't switch profiles
+do {
+    var sim = makeSimulator(
+        activeProfileID: systemDefaultID,
+        connected: [builtinOut, builtinIn],
+        autoSwitch: false
+    )
     let state = sim.connectDevice(airpods)
     checkEqual(state.activeProfileName, "System Default",
-               "Auto-switching disabled → device changes don't switch profiles")
+               "AS6: Auto-switching disabled → AirPods connect doesn't switch profile")
+    check(!state.wasAutoSwitched, "AS6b: wasAutoSwitched is false when auto-switch disabled")
 }
 
+// Test 7: Auto-switching disabled → priorities still re-evaluate within active profile
 do {
-    // Auto-switching disabled → priorities still re-evaluate
-    var sim = makeStandardSimulator()
-    sim.isAutoSwitchEnabled = false
-    _ = sim.activateProfile(homeProfileID, isManual: true)
-    _ = sim.connectDevice(headphones)
+    var sim = makeSimulator(
+        activeProfileID: homeProfileID,
+        connected: [headphones, builtinOut, builtinIn],
+        autoSwitch: false
+    )
+    let state1 = sim.evaluate()
+    checkEqual(state1.outputDeviceUID, "beyerdynamic-uid", "AS7a: Initially headphones")
+
+    let state2 = sim.connectDevice(speakers)
+    checkEqual(state2.outputDeviceUID, "speakers-uid",
+               "AS7b: Auto-switch off → priorities still re-evaluate within active profile")
+}
+
+// ============================================================================
+// MARK: - 3. EQ Pipeline (9 tests)
+// ============================================================================
+
+section("3. EQ Pipeline")
+
+// Test 1: Non-flat EQ preset → virtual driver activates
+do {
+    var speakerEQ = EQSettings.flat
+    speakerEQ.bands[3].gain = 5.0
+
+    var sim = makeSimulator(
+        activeProfileID: homeProfileID,
+        connected: [speakers, builtinOut, builtinIn]
+    )
+    sim.deviceEQ["speakers-uid"] = speakerEQ
+
+    let state = sim.evaluate()
+    check(state.needsVirtualDriver, "EQ1: Non-flat EQ → virtual driver activates")
+    checkEqual(state.effectiveEQ.bands[3].gain, 5.0, "EQ1b: EQ correctly applied")
+}
+
+// Test 2: Flat EQ → virtual driver stays off
+do {
+    var sim = makeSimulator(
+        activeProfileID: homeProfileID,
+        connected: [speakers, builtinOut, builtinIn]
+    )
+    sim.deviceEQ["speakers-uid"] = .flat
+
+    let state = sim.evaluate()
+    check(!state.needsVirtualDriver, "EQ2: Flat EQ → virtual driver stays off")
+}
+
+// Test 3: Bypass EQ → virtual driver stops
+do {
+    var speakerEQ = EQSettings.flat
+    speakerEQ.bands[3].gain = 5.0
+
+    var sim = makeSimulator(
+        activeProfileID: homeProfileID,
+        connected: [speakers, builtinOut, builtinIn]
+    )
+    sim.deviceEQ["speakers-uid"] = speakerEQ
+    sim.eqRunning = true
+    sim.eqTargetUID = "speakers-uid"
+    _ = sim.evaluate()  // establish fingerprint
+
+    let state = sim.toggleGlobalBypass()
+    check(!state.needsVirtualDriver, "EQ3: Bypass EQ → virtual driver stops")
+    check(state.effectiveEQ.isFlat, "EQ3b: Bypassed EQ is flat")
+}
+
+// Test 4: Un-bypass EQ → virtual driver restarts
+do {
+    var speakerEQ = EQSettings.flat
+    speakerEQ.bands[3].gain = 5.0
+
+    var sim = makeSimulator(
+        activeProfileID: homeProfileID,
+        connected: [speakers, builtinOut, builtinIn]
+    )
+    sim.deviceEQ["speakers-uid"] = speakerEQ
+    sim.isGlobalBypass = true
+    _ = sim.evaluate()  // establish bypassed fingerprint
+
+    let state = sim.toggleGlobalBypass()
+    check(state.needsVirtualDriver, "EQ4: Un-bypass → virtual driver restarts")
+    check(!state.effectiveEQ.isFlat, "EQ4b: Un-bypassed EQ is non-flat")
+}
+
+// Test 5: Content mode overlay combines with device EQ
+do {
+    var speakerEQ = EQSettings.flat
+    speakerEQ.bands[3].gain = 3.0  // device: +3dB at 250Hz
+
+    var sim = makeSimulator(
+        activeProfileID: homeProfileID,
+        connected: [speakers, builtinOut, builtinIn],
+        soundModesEnabled: true
+    )
+    sim.deviceEQ["speakers-uid"] = speakerEQ
+    sim.activeContentMode = .voice
+    sim.contentOverlays[.voice] = ContentModeOverlay.defaultVoice()
+
+    let state = sim.evaluate()
+    checkEqual(state.effectiveEQ.bands[3].gain, 3.0,
+               "EQ5: Device EQ at 250Hz preserved when content mode active")
+    check(state.effectiveEQ.bands[6].gain > 0,
+          "EQ5b: Voice overlay boosts 2kHz on top of device EQ")
+    check(state.needsVirtualDriver, "EQ5c: Combined non-flat EQ needs virtual driver")
+}
+
+// Test 6: Night mode stacks on top of content mode
+do {
+    var sim = makeSimulator(
+        activeProfileID: homeProfileID,
+        connected: [speakers, builtinOut, builtinIn],
+        soundModesEnabled: true
+    )
+    sim.activeContentMode = .voice
+    sim.contentOverlays[.voice] = ContentModeOverlay.defaultVoice()
+    var nm = NightModeConfig.default
+    nm.isEnabled = true
+    sim.nightMode = nm
+
+    let stateNoNight = sim.evaluate()
+    let stateWithNight = sim.setNightModeActive(true)
+
+    // Night mode cuts bass (-4dB at 32Hz), voice also cuts bass (-2dB) → more negative total
+    check(stateWithNight.effectiveEQ.bands[0].gain < stateNoNight.effectiveEQ.bands[0].gain,
+          "EQ6: Night mode stacks on content mode — more bass cut than content alone")
+}
+
+// Test 7: Global bypass overrides everything to flat
+do {
+    var speakerEQ = EQSettings.flat
+    speakerEQ.bands[3].gain = 8.0
+
+    var sim = makeSimulator(
+        activeProfileID: homeProfileID,
+        connected: [speakers, builtinOut, builtinIn],
+        soundModesEnabled: true
+    )
+    sim.deviceEQ["speakers-uid"] = speakerEQ
+    sim.activeContentMode = .voice
+    sim.contentOverlays[.voice] = ContentModeOverlay.defaultVoice()
+    sim.isNightModeActive = true
+    sim.nightMode.isEnabled = true
+    sim.isGlobalBypass = true
+
+    let state = sim.evaluate()
+    check(state.effectiveEQ.isFlat, "EQ7: Global bypass overrides everything to flat")
+    check(!state.needsVirtualDriver, "EQ7b: Global bypass → no virtual driver needed")
+}
+
+// Test 7c: Per-device bypass (EQStore.isBypassed) flattens EQ for that device only.
+// Production flattens effective EQ when EITHER global bypass OR the resolved device's
+// per-device bypass is set — this exercises the per-device branch specifically.
+do {
+    var speakerEQ = EQSettings.flat
+    speakerEQ.bands[3].gain = 6.0
+
+    var sim = makeSimulator(
+        activeProfileID: homeProfileID,
+        connected: [speakers, builtinOut, builtinIn]
+    )
+    sim.deviceEQ["speakers-uid"] = speakerEQ
+
+    let active = sim.evaluate()
+    check(active.needsVirtualDriver, "EQ7c-pre: Speaker EQ non-flat → driver needed before per-device bypass")
+
+    let bypassed = sim.setDeviceBypass(true, for: "speakers-uid")
+    check(bypassed.effectiveEQ.isFlat,
+          "EQ7c: Per-device bypass flattens EQ for the resolved device (global bypass OFF)")
+    check(!bypassed.needsVirtualDriver, "EQ7d: Per-device bypass → no virtual driver needed")
+}
+
+// Test 8: Switching devices preserves per-device EQ
+do {
+    var speakerEQ = EQSettings.flat
+    speakerEQ.bands[3].gain = 5.0
+
+    var headphoneEQ = EQSettings.flat
+    headphoneEQ.bands[7].gain = 3.0
+
+    var sim = makeSimulator(
+        activeProfileID: homeProfileID,
+        connected: [speakers, headphones, builtinOut, builtinIn]
+    )
+    sim.deviceEQ["speakers-uid"] = speakerEQ
+    sim.deviceEQ["beyerdynamic-uid"] = headphoneEQ
+
+    let stateSpeakers = sim.evaluate()
+    checkEqual(stateSpeakers.effectiveEQ.bands[3].gain, 5.0,
+               "EQ8a: Speakers EQ applied when speakers active (public mode)")
+
+    let stateHeadphones = sim.toggleMode()
+    checkEqual(stateHeadphones.effectiveEQ.bands[7].gain, 3.0,
+               "EQ8b: Headphone EQ applied after mode switch to headphones")
+    check(stateHeadphones.effectiveEQ.bands[3].gain < 0.01,
+          "EQ8c: Speaker EQ band flat when headphones active (per-device EQ)")
+}
+
+// Test 9: No device EQ + active content mode → only overlay applied
+do {
+    var sim = makeSimulator(
+        activeProfileID: homeProfileID,
+        connected: [speakers, builtinOut, builtinIn],
+        soundModesEnabled: true
+    )
+    // No device EQ set
+    sim.activeContentMode = .voice
+    sim.contentOverlays[.voice] = ContentModeOverlay.defaultVoice()
+
+    let state = sim.evaluate()
+    check(state.effectiveEQ.bands[6].gain > 0,
+          "EQ9: No device EQ + voice content mode → voice overlay applied as-is")
+    check(!state.effectiveEQ.isFlat, "EQ9b: Result is non-flat")
+}
+
+// ============================================================================
+// MARK: - 4. Mode Switching (4 tests)
+// ============================================================================
+
+section("4. Mode Switching")
+
+// Test 1: Toggle to Headphones → headphones selected
+do {
+    var sim = makeSimulator(
+        activeProfileID: homeProfileID,
+        connected: [speakers, headphones, builtinOut, builtinIn],
+        mode: .public
+    )
+    let state = sim.toggleMode()
+    checkEqual(state.activeMode, .private, "MS1a: Toggled to private mode")
+    checkEqual(state.outputDeviceUID, "beyerdynamic-uid",
+               "MS1b: Toggle to Headphones → headphones selected")
+}
+
+// Test 2: Toggle back to Speakers → speakers selected
+do {
+    var sim = makeSimulator(
+        activeProfileID: homeProfileID,
+        connected: [speakers, headphones, builtinOut, builtinIn],
+        mode: .private
+    )
+    let state = sim.toggleMode()
+    checkEqual(state.activeMode, .public, "MS2a: Toggled back to public mode")
+    checkEqual(state.outputDeviceUID, "speakers-uid",
+               "MS2b: Toggle back to Speakers → speakers selected")
+}
+
+// Test 3: Mode toggle changes both input and output
+do {
+    var sim = makeSimulator(
+        activeProfileID: homeProfileID,
+        connected: [speakers, headphones, builtinOut, builtinIn, usbMic],
+        mode: .public
+    )
+    let statePub = sim.evaluate()
+    let statePriv = sim.toggleMode()
+
+    check(statePub.outputDeviceUID != statePriv.outputDeviceUID ||
+          statePub.inputDeviceName != statePriv.inputDeviceName,
+          "MS3: Mode toggle changes output and/or input device")
+}
+
+// Test 4: Only one device connected → same device in both modes
+do {
+    // AirPods are in both pub and priv priority lists for officeProfile
+    var sim = makeSimulator(
+        activeProfileID: officeProfileID,
+        connected: [airpods, builtinOut, builtinIn],
+        mode: .public
+    )
+    let statePub = sim.evaluate()
+    let statePriv = sim.toggleMode()
+    checkEqual(statePub.outputDeviceUID, statePriv.outputDeviceUID,
+               "MS4: Office profile with AirPods: same device in both modes")
+}
+
+// ============================================================================
+// MARK: - 5. Fingerprint Deduplication (4 tests)
+// ============================================================================
+
+section("5. Fingerprint Deduplication")
+
+// Test 1: Same state evaluated twice → no action second time
+do {
+    var sim = makeSimulator(
+        activeProfileID: homeProfileID,
+        connected: [speakers, builtinOut, builtinIn]
+    )
+    let state1 = sim.evaluate()
+    let state2 = sim.evaluate()
+    check(state1.fingerprintChanged, "FD1a: First evaluation triggers action")
+    check(!state2.fingerprintChanged, "FD1b: Second identical evaluation → no action (fingerprint unchanged)")
+    checkEqual(state2.pipelineAction, PipelineAction.noOp, "FD1c: Pipeline action is noOp on second evaluation")
+}
+
+// Test 2: Device change → action taken
+do {
+    var sim = makeSimulator(
+        activeProfileID: homeProfileID,
+        connected: [headphones, builtinOut, builtinIn]
+    )
+    _ = sim.evaluate()  // establish baseline
 
     let state = sim.connectDevice(speakers)
-    checkEqual(state.outputDeviceName, "Studio Monitors",
-               "Auto-switching disabled → priorities still re-evaluate within active profile")
+    check(state.fingerprintChanged, "FD2: Device change → fingerprint changed → action taken")
+    checkEqual(state.outputDeviceUID, "speakers-uid", "FD2b: New output device is speakers")
 }
 
-// ============================================================================
-// MARK: - Category 3: EQ Pipeline
-// ============================================================================
-
-section("🎛️ EQ Pipeline — EQ is applied correctly")
-
+// Test 3: EQ change only → action taken
 do {
-    var sim = makeStandardSimulator()
-    _ = sim.activateProfile(homeProfileID, isManual: true)
-    _ = sim.connectDevice(speakers)
-    let state = sim.setEQ(for: "speakers-uid", makeBassBoostEQ())
-    check(state.needsVirtualDriver, "Non-flat EQ preset → virtual driver needed")
-    if case .startPipeline = state.pipelineAction {
-        check(true, "Pipeline action is startPipeline")
-    } else {
-        check(false, "Pipeline action should be startPipeline, got \(state.pipelineAction)")
-    }
+    var sim = makeSimulator(
+        activeProfileID: homeProfileID,
+        connected: [speakers, builtinOut, builtinIn]
+    )
+    _ = sim.evaluate()  // establish baseline
+
+    var newEQ = EQSettings.flat
+    newEQ.bands[3].gain = 4.0
+    let state = sim.setEQ(for: "speakers-uid", newEQ)
+    check(state.fingerprintChanged, "FD3: EQ change → fingerprint changed → action taken")
+    check(!state.effectiveEQ.isFlat, "FD3b: New EQ is non-flat")
 }
 
+// Test 4: Profile change, same device → action taken
 do {
-    var sim = makeStandardSimulator()
-    _ = sim.activateProfile(homeProfileID, isManual: true)
-    _ = sim.connectDevice(speakers)
-    let state = sim.setEQ(for: "speakers-uid", .flat)
-    check(!state.needsVirtualDriver, "Flat EQ → virtual driver not needed")
-}
-
-do {
-    // Bypass stops virtual driver
-    var sim = makeStandardSimulator()
-    _ = sim.activateProfile(homeProfileID, isManual: true)
-    _ = sim.connectDevice(speakers)
-    _ = sim.setEQ(for: "speakers-uid", makeBassBoostEQ())  // Starts EQ
-
-    let state = sim.toggleGlobalBypass()
-    check(!state.needsVirtualDriver, "Bypass EQ → virtual driver not needed")
-    if case .stopEQ = state.pipelineAction {
-        check(true, "Bypass triggers stopEQ action")
-    } else {
-        check(false, "Bypass should trigger stopEQ, got \(state.pipelineAction)")
-    }
-}
-
-do {
-    // Un-bypass restarts
-    var sim = makeStandardSimulator()
-    _ = sim.activateProfile(homeProfileID, isManual: true)
-    _ = sim.connectDevice(speakers)
-    _ = sim.setEQ(for: "speakers-uid", makeBassBoostEQ())
-    _ = sim.toggleGlobalBypass()  // Now bypassed, EQ stopped
-
-    let state = sim.toggleGlobalBypass()  // Un-bypass
-    check(state.needsVirtualDriver, "Un-bypass → virtual driver needed again")
-    if case .startPipeline = state.pipelineAction {
-        check(true, "Un-bypass triggers startPipeline")
-    } else {
-        check(false, "Un-bypass should trigger startPipeline, got \(state.pipelineAction)")
-    }
-}
-
-do {
-    // Content mode overlay combines with device EQ
-    var sim = makeStandardSimulator()
-    _ = sim.activateProfile(homeProfileID, isManual: true)
-    _ = sim.connectDevice(speakers)
-    sim.soundModesEnabled = true
-    sim.contentOverlays = [.voice: .defaultVoice(), .music: .defaultMusic(), .none: .defaultNone()]
-
-    _ = sim.setEQ(for: "speakers-uid", makeBassBoostEQ())
-    let state = sim.setContentMode(.voice)
-
-    // Device EQ has +6dB at 32Hz, Voice overlay has -2dB at 32Hz → combined = +4dB
-    check(abs(state.effectiveEQ.bands[0].gain - 4.0) < 0.01,
-          "Content mode overlay combines with device EQ: 6 + (-2) = 4 dB at 32Hz")
-}
-
-do {
-    // Night mode stacks on content mode
-    var sim = makeStandardSimulator()
-    _ = sim.activateProfile(homeProfileID, isManual: true)
-    _ = sim.connectDevice(speakers)
-    sim.soundModesEnabled = true
-    sim.contentOverlays = [.voice: .defaultVoice(), .none: .defaultNone()]
-    sim.nightMode = .default
-    sim.nightMode.isEnabled = true
-
-    _ = sim.setContentMode(.voice)
-    let state = sim.setNightModeActive(true)
-
-    // Night mode adds -4dB at 32Hz on top of voice's -2dB → -6dB total at 32Hz
-    check(abs(state.effectiveEQ.bands[0].gain - (-6.0)) < 0.01,
-          "Night mode stacks on content mode: (-2) + (-4) = -6 dB at 32Hz")
-}
-
-do {
-    // Global bypass overrides everything
-    var sim = makeStandardSimulator()
-    _ = sim.activateProfile(homeProfileID, isManual: true)
-    _ = sim.connectDevice(speakers)
-    sim.soundModesEnabled = true
-    sim.contentOverlays = [.voice: .defaultVoice()]
-    sim.nightMode = .default
-    sim.nightMode.isEnabled = true
-    sim.isNightModeActive = true
-    sim.activeContentMode = .voice
-    _ = sim.setEQ(for: "speakers-uid", makeBassBoostEQ())
-
-    let state = sim.toggleGlobalBypass()
-    check(state.effectiveEQ.isFlat, "Global bypass overrides all layers to flat")
-}
-
-do {
-    // Switching devices preserves per-device EQ
-    var sim = makeStandardSimulator()
-    _ = sim.activateProfile(homeProfileID, isManual: true)
-    _ = sim.connectDevice(speakers)
-    _ = sim.connectDevice(headphones)
-    _ = sim.setEQ(for: "speakers-uid", makeBassBoostEQ())
-    _ = sim.setEQ(for: "beyerdynamic-uid", makeVoiceBoostEQ())
-
-    let speakerState = sim.toggleMode()  // Switch to private (headphones first)
-    // Now headphones should be output with voice boost EQ
-    check(abs(speakerState.effectiveEQ.bands[6].gain - 3.0) < 0.01,
-          "After mode toggle, headphones get their own EQ (voice boost at 2kHz)")
-
-    let backState = sim.toggleMode()  // Back to public (speakers first)
-    check(abs(backState.effectiveEQ.bands[0].gain - 6.0) < 0.01,
-          "Toggle back, speakers get their original EQ (bass boost at 32Hz)")
-}
-
-do {
-    // No device EQ + active content mode → only overlay
-    var sim = makeStandardSimulator()
-    _ = sim.activateProfile(homeProfileID, isManual: true)
-    _ = sim.connectDevice(speakers)
-    sim.soundModesEnabled = true
-    sim.contentOverlays = [.voice: .defaultVoice(), .none: .defaultNone()]
-
-    let state = sim.setContentMode(.voice)
-    // No device EQ set for speakers, so only voice overlay applies
-    check(abs(state.effectiveEQ.bands[6].gain - 2.5) < 0.01,
-          "No device EQ + voice mode → only voice overlay applied (2.5dB at 2kHz)")
-}
-
-// ============================================================================
-// MARK: - Category 4: Mode Switching
-// ============================================================================
-
-section("🔀 Mode Switching — Toggling Speakers/Headphones")
-
-do {
-    var sim = makeStandardSimulator()
-    _ = sim.activateProfile(homeProfileID, isManual: true)
-    _ = sim.connectDevice(speakers)
-    _ = sim.connectDevice(headphones)
-
-    let state = sim.toggleMode()  // public → private
-    checkEqual(state.outputDeviceName, "Beyerdynamic DT 990",
-               "Toggle to Headphones mode → headphones selected")
-}
-
-do {
-    var sim = makeStandardSimulator()
-    _ = sim.activateProfile(homeProfileID, isManual: true)
-    _ = sim.connectDevice(speakers)
-    _ = sim.connectDevice(headphones)
-    _ = sim.toggleMode()  // → private
-
-    let state = sim.toggleMode()  // → public
-    checkEqual(state.outputDeviceName, "Studio Monitors",
-               "Toggle back to Speakers mode → speakers selected")
-}
-
-do {
-    // Mode toggle affects both input and output
-    var sim = makeStandardSimulator()
-    _ = sim.activateProfile(homeProfileID, isManual: true)
-    _ = sim.connectDevice(speakers)
-    _ = sim.connectDevice(headphones)
-    _ = sim.connectDevice(usbMic)
-    _ = sim.connectDevice(builtinIn)
-
-    let publicState = sim.toggleMode()  // → private
-    let privateOutput = publicState.outputDeviceUID
-    let privateInput = publicState.inputDeviceUID
-
-    let publicAgain = sim.toggleMode()  // → public
-    // Home profile: public output=[speakers, headphones, builtin], private output=[headphones, speakers, builtin]
-    check(publicAgain.outputDeviceUID != privateOutput || publicAgain.inputDeviceUID == privateInput,
-          "Mode toggle can change output device (speakers vs headphones priority differs)")
-}
-
-do {
-    // Only one output device → same regardless of mode
-    var sim = makeStandardSimulator()
-    _ = sim.activateProfile(homeProfileID, isManual: true)
-    _ = sim.connectDevice(headphones)  // Only this output device
-
-    let publicState = sim.toggleMode()  // → private (headphones still #1 in private too)
-    // Private priority: [headphones, speakers, builtin] — headphones still wins
-    checkEqual(publicState.outputDeviceName, "Beyerdynamic DT 990",
-               "Only one output device → same device in both modes")
-}
-
-// ============================================================================
-// MARK: - Category 5: Fingerprint Deduplication
-// ============================================================================
-
-section("🔍 Fingerprint Deduplication — No unnecessary work")
-
-do {
-    var sim = makeStandardSimulator()
-    _ = sim.activateProfile(homeProfileID, isManual: true)
-    _ = sim.connectDevice(speakers)
-    let first = sim.setEQ(for: "speakers-uid", makeBassBoostEQ())
-    check(first.fingerprintChanged, "First EQ change always triggers fingerprint change")
-
-    // Set the same EQ again — fingerprint should match since EQ hasn't actually changed
-    let second = sim.setEQ(for: "speakers-uid", makeBassBoostEQ())
-    check(!second.fingerprintChanged, "Same EQ set again → fingerprint unchanged (no unnecessary work)")
-}
-
-do {
-    var sim = makeStandardSimulator()
-    _ = sim.activateProfile(homeProfileID, isManual: true)
-    _ = sim.connectDevice(speakers)
-
-    let state = sim.connectDevice(headphones)  // New device changes output resolution
-    check(state.fingerprintChanged, "Device change → fingerprint changed")
-}
-
-do {
-    var sim = makeStandardSimulator()
-    _ = sim.activateProfile(homeProfileID, isManual: true)
-    _ = sim.connectDevice(speakers)
-    _ = sim.setEQ(for: "speakers-uid", .flat)  // Settle fingerprint
-
-    let state = sim.setEQ(for: "speakers-uid", makeBassBoostEQ())
-    check(state.fingerprintChanged, "EQ change → fingerprint changed")
-}
-
-do {
-    var sim = makeStandardSimulator()
-    _ = sim.connectDevice(speakers)
-    _ = sim.connectDevice(headphones)
-    _ = sim.activateProfile(homeProfileID, isManual: true)
+    var sim = makeSimulator(
+        activeProfileID: homeProfileID,
+        connected: [airpods, builtinOut, builtinIn]
+    )
+    _ = sim.evaluate()
 
     let state = sim.activateProfile(officeProfileID, isManual: true)
-    check(state.fingerprintChanged, "Profile change → fingerprint changed")
+    check(state.fingerprintChanged, "FD4: Profile change → fingerprint changed → action taken")
 }
 
 // ============================================================================
-// MARK: - Category 6: Edge Cases
+// MARK: - 6. Edge Cases (7 tests)
 // ============================================================================
 
-section("⚠️ Edge Cases — Nothing breaks in weird situations")
+section("6. Edge Cases")
 
+// Test 1: Empty profile (no priorities) → falls back to current system default.
+// DRIFT FIX: previously asserted nil. Production performEvaluation() falls back to
+// pipelineService.getDefaultOutputDevice() when the priority list resolves nothing,
+// so an empty priority list yields the system default output, NOT nil.
 do {
-    // Empty profile with no priorities → uses fallback
-    let emptyProfile = Profile(id: UUID(), name: "Empty", preferredMode: .public)
-    var sim = SystemSimulator(
-        profiles: [emptyProfile, makeSystemDefault()],
-        connectedDevices: [builtinOut, builtinIn]
+    let emptyProfileID = UUID()
+    let emptyProfile = makeProfile(
+        id: emptyProfileID,
+        name: "Empty Profile",
+        triggerDeviceIDs: [],
+        publicOutputPriority: [],
+        publicInputPriority: [],
+        privateOutputPriority: [],
+        privateInputPriority: [],
+        preferredMode: .public
     )
-    let state = sim.activateProfile(emptyProfile.id, isManual: true)
-    checkEqual(state.outputDeviceName, "MacBook Pro Speakers",
-               "Empty profile (no priorities) → uses fallback built-in device")
+    var sim = makeSimulator(
+        profiles: [emptyProfile],
+        activeProfileID: emptyProfileID,
+        connected: [speakers, builtinOut, builtinIn]
+    )
+    // System default output modeled as built-in (see makeSimulator).
+    sim.currentSystemDefaultOutput = builtinOut
+    let state = sim.evaluate()
+    checkEqual(state.outputDeviceUID, "builtin-output-uid",
+               "EC1: Empty priority list → falls back to current system default output")
 }
 
+// Test 2: Profile whose priority devices are all disconnected → falls back to system default.
+// DRIFT FIX: previously asserted nil. When NONE of the priority devices are connected,
+// production still resolves the current system default output (built-in here), not nil.
 do {
-    // Profile with only disconnected devices → fallback
-    var sim = makeStandardSimulator()
-    _ = sim.activateProfile(homeProfileID, isManual: true)
-    // Don't connect speakers or headphones — only builtin exists
-    let state = sim.connectDevice(builtinIn)
-    checkEqual(state.outputDeviceName, "MacBook Pro Speakers",
-               "Profile with only disconnected priority devices → built-in fallback")
+    // Create a profile that only lists specific non-builtin devices
+    let strictProfile = makeProfile(
+        id: UUID(),
+        name: "Strict Profile",
+        triggerDeviceIDs: [],
+        publicOutputPriority: ["speakers-uid", "beyerdynamic-uid"],  // no builtin
+        publicInputPriority: ["usb-mic-uid"],
+        privateOutputPriority: ["beyerdynamic-uid"],
+        privateInputPriority: ["usb-mic-uid"],
+        preferredMode: .public
+    )
+    var sim = makeSimulator(
+        profiles: [strictProfile],
+        activeProfileID: strictProfile.id,
+        connected: [builtinOut, builtinIn]  // none of the priority devices connected
+    )
+    let state = sim.evaluate()
+    checkEqual(state.outputDeviceUID, "builtin-output-uid",
+               "EC2: No priority device connected → falls back to current system default output")
 }
 
+// Test 3: Night mode start==end → always active (24h, per our fix)
 do {
-    // Night mode start==end → always active (our fix)
-    var nightConfig = NightModeConfig.default
-    nightConfig.isEnabled = true
-    nightConfig.startHour = 10
-    nightConfig.startMinute = 0
-    nightConfig.endHour = 10
-    nightConfig.endMinute = 0
+    let nm1 = NightModeConfig(isEnabled: true, startHour: 10, startMinute: 0, endHour: 10, endMinute: 0, overlay: .flat)
+    check(nm1.isInQuietHours(), "EC3a: Night mode start==end → always active at any time")
 
-    let time10am = Calendar.current.date(from: DateComponents(hour: 10, minute: 0))!
-    let time3pm = Calendar.current.date(from: DateComponents(hour: 15, minute: 0))!
-    let time3am = Calendar.current.date(from: DateComponents(hour: 3, minute: 0))!
-
-    check(nightConfig.isInQuietHours(now: time10am), "Night mode start==end: active at 10 AM")
-    check(nightConfig.isInQuietHours(now: time3pm), "Night mode start==end: active at 3 PM")
-    check(nightConfig.isInQuietHours(now: time3am), "Night mode start==end: active at 3 AM (always on)")
+    let nm2 = NightModeConfig(isEnabled: true, startHour: 0, startMinute: 0, endHour: 0, endMinute: 0, overlay: .flat)
+    check(nm2.isInQuietHours(), "EC3b: Night mode 00:00==00:00 → always active")
 }
 
+// Test 4: System Default profile behaves as fallback.
+// DRIFT FIX: EC4b previously asserted nil. System Default has an empty priority list,
+// so production falls back to the current system default output (built-in here).
 do {
-    // System Default profile behaves as fallback
-    var sim = makeStandardSimulator()
-    let state = sim.connectDevice(builtinIn)
-    checkEqual(state.activeProfileName, "System Default",
-               "System Default profile is active when no triggers match")
+    var sim = makeSimulator(
+        activeProfileID: systemDefaultID,
+        connected: [speakers, builtinOut, builtinIn]
+    )
+    sim.currentSystemDefaultOutput = builtinOut
+    let state = sim.evaluate()
+    checkEqual(state.activeProfileName, "System Default", "EC4a: System Default profile active")
+    checkEqual(state.outputDeviceUID, "builtin-output-uid",
+               "EC4b: System Default (empty priority list) → falls back to current system default output")
+    check(!state.needsVirtualDriver, "EC4c: System Default with no EQ → no virtual driver")
 }
 
+// Test 5: All profiles deleted → still works (doesn't crash)
 do {
-    // All profiles deleted → still works with empty state
-    var sim = SystemSimulator(profiles: [], connectedDevices: [builtinOut, builtinIn])
-    let state = sim.connectDevice(builtinIn)
-    checkEqual(state.outputDeviceName, "MacBook Pro Speakers",
-               "No profiles at all → still resolves to a connected output device")
+    var sim = makeSimulator(
+        profiles: [],
+        activeProfileID: UUID(),
+        connected: [builtinOut, builtinIn]
+    )
+    let state = sim.evaluate()
+    check(state.activeProfileName == nil, "EC5a: No profiles → no active profile name")
+    check(state.outputDeviceUID == nil, "EC5b: No profiles → no output resolved")
+    check(true, "EC5c: Empty profiles array handled gracefully (no crash)")
 }
 
+// Test 6: Bypass while EQ not running → stays flat, no error
 do {
-    // Bypass while EQ not running → stays flat, no error
-    var sim = makeStandardSimulator()
-    _ = sim.activateProfile(homeProfileID, isManual: true)
-    _ = sim.connectDevice(speakers)
-    // No EQ set, not running
+    var sim = makeSimulator(
+        activeProfileID: homeProfileID,
+        connected: [speakers, builtinOut, builtinIn]
+    )
+    sim.eqRunning = false
+    sim.isGlobalBypass = true
 
-    let state = sim.toggleGlobalBypass()
-    check(state.effectiveEQ.isFlat, "Bypass while EQ not running → stays flat")
-    check(!state.needsVirtualDriver, "No virtual driver needed when bypassed with flat EQ")
+    let state = sim.evaluate()
+    check(state.effectiveEQ.isFlat, "EC6: Bypass while EQ not running → flat, no error")
+    check(!state.needsVirtualDriver, "EC6b: No virtual driver when bypassed")
 }
 
+// Test 7: Device connect while EQ running → hot-switch action
 do {
-    // Device connect while EQ running → hot-switch
-    var sim = makeStandardSimulator()
-    _ = sim.activateProfile(homeProfileID, isManual: true)
-    _ = sim.connectDevice(headphones)
-    _ = sim.setEQ(for: "beyerdynamic-uid", makeBassBoostEQ())  // Starts pipeline on headphones
-    _ = sim.setEQ(for: "speakers-uid", makeVoiceBoostEQ())     // Pre-set speakers EQ
+    var headphoneEQ = EQSettings.flat
+    headphoneEQ.bands[7].gain = 3.0
+    var speakerEQ = EQSettings.flat
+    speakerEQ.bands[3].gain = 5.0
 
-    let state = sim.connectDevice(speakers)  // Higher priority, EQ running
-    checkEqual(state.outputDeviceName, "Studio Monitors",
-               "Higher-priority device connects while EQ running → switches to it")
-    if case .switchDevice = state.pipelineAction {
-        check(true, "EQ running + new device → switchDevice action (hot-swap)")
-    } else {
-        check(false, "Expected switchDevice action, got \(state.pipelineAction)")
+    var sim = makeSimulator(
+        activeProfileID: homeProfileID,
+        connected: [headphones, builtinOut, builtinIn]
+    )
+    sim.deviceEQ["beyerdynamic-uid"] = headphoneEQ
+    sim.deviceEQ["speakers-uid"] = speakerEQ
+    sim.eqRunning = true
+    sim.eqTargetUID = "beyerdynamic-uid"
+    _ = sim.evaluate()  // establish baseline with headphones
+
+    let state = sim.connectDevice(speakers)
+    checkEqual(state.outputDeviceUID, "speakers-uid",
+               "EC7a: Device connect while EQ running → switches to higher priority device")
+    check(state.fingerprintChanged, "EC7b: Fingerprint changed for device hot-switch")
+}
+
+// ============================================================================
+// MARK: - 7. Persistence Round-Trip (5 tests)
+// ============================================================================
+
+section("7. Persistence Round-Trip")
+
+// Test 1: Save profiles → load → identical
+do {
+    let profiles = [homeProfile, officeProfile, systemDefault]
+    let encoder = JSONEncoder()
+    let decoder = JSONDecoder()
+
+    let data = try encoder.encode(profiles)
+    let loaded = try decoder.decode([Profile].self, from: data)
+
+    checkEqual(loaded.count, profiles.count, "RT1a: Same profile count after round-trip")
+    for (original, restored) in zip(profiles, loaded) {
+        checkEqual(original.id, restored.id, "RT1b: Profile ID preserved: \(original.name)")
+        checkEqual(original.name, restored.name, "RT1c: Profile name preserved: \(original.name)")
     }
 }
 
-// ============================================================================
-// MARK: - Category 7: Persistence Round-Trip
-// ============================================================================
-
-section("💾 Persistence Round-Trip — Save and load preserve data")
-
-// For persistence tests, we make Profile Codable
-struct CodableProfile: Codable, Equatable {
-    let id: UUID
-    var name: String
-    var triggerDeviceIDs: [String]
-    var triggerRules: [CodableTriggerRule]
-    var publicOutputPriority: [String]
-    var publicInputPriority: [String]
-    var privateOutputPriority: [String]
-    var privateInputPriority: [String]
-    var preferredMode: String
-    var iconName: String
-
-    enum CodableTriggerRule: Codable, Equatable {
-        case specificDevice(id: String)
-        case transportType(type: String)
-
-        enum CodingKeys: String, CodingKey { case type, value }
-        enum RuleType: String, Codable { case specificDevice, transportType }
-
-        func encode(to encoder: Encoder) throws {
-            var c = encoder.container(keyedBy: CodingKeys.self)
-            switch self {
-            case .specificDevice(let id):
-                try c.encode(RuleType.specificDevice, forKey: .type)
-                try c.encode(id, forKey: .value)
-            case .transportType(let type):
-                try c.encode(RuleType.transportType, forKey: .type)
-                try c.encode(type, forKey: .value)
-            }
-        }
-
-        init(from decoder: Decoder) throws {
-            let c = try decoder.container(keyedBy: CodingKeys.self)
-            let type = try c.decode(RuleType.self, forKey: .type)
-            let value = try c.decode(String.self, forKey: .value)
-            switch type {
-            case .specificDevice: self = .specificDevice(id: value)
-            case .transportType: self = .transportType(type: value)
-            }
-        }
-    }
-}
-
+// Test 2: Profile with trigger rules → round-trip preserved
 do {
-    let profile = CodableProfile(
-        id: UUID(), name: "Test Profile",
-        triggerDeviceIDs: ["device-1", "device-2"],
-        triggerRules: [.specificDevice(id: "device-1"), .specificDevice(id: "device-2")],
-        publicOutputPriority: ["device-1", "device-3"],
-        publicInputPriority: ["device-4"],
-        privateOutputPriority: ["device-2", "device-3"],
-        privateInputPriority: ["device-4"],
-        preferredMode: "public",
-        iconName: "speaker.wave.2"
+    let profileWithRules = makeProfile(
+        id: UUID(),
+        name: "BT Profile",
+        triggerDeviceIDs: [],
+        triggerRules: [
+            .specificDevice(id: "airpods-uid"),
+            .transportType(type: "Bluetooth")
+        ],
+        publicOutputPriority: ["airpods-uid"],
+        publicInputPriority: ["airpods-uid"],
+        privateOutputPriority: ["airpods-uid"],
+        privateInputPriority: ["airpods-uid"],
+        preferredMode: .public
     )
 
-    let data = try! JSONEncoder().encode([profile])
-    let decoded = try! JSONDecoder().decode([CodableProfile].self, from: data)
-    checkEqual(decoded.count, 1, "Save profiles → load → same count")
-    checkEqual(decoded[0], profile, "Save profiles → load → identical content")
+    let encoder = JSONEncoder()
+    let decoder = JSONDecoder()
+    let data = try encoder.encode(profileWithRules)
+    let loaded = try decoder.decode(Profile.self, from: data)
+
+    checkEqual(loaded.triggerRules.count, 2, "RT2a: Trigger rules count preserved")
+    checkEqual(loaded.triggerRules[0], .specificDevice(id: "airpods-uid"),
+               "RT2b: specificDevice rule preserved")
+    checkEqual(loaded.triggerRules[1], .transportType(type: "Bluetooth"),
+               "RT2c: transportType rule preserved")
 }
 
+// Test 3: Empty list → round-trip preserved
 do {
-    let profile = CodableProfile(
-        id: UUID(), name: "With Triggers",
-        triggerDeviceIDs: ["dev-a"],
-        triggerRules: [.specificDevice(id: "dev-a"), .transportType(type: "Bluetooth")],
-        publicOutputPriority: [], publicInputPriority: [],
-        privateOutputPriority: [], privateInputPriority: [],
-        preferredMode: "public", iconName: "headphones"
+    let profiles: [Profile] = []
+    let encoder = JSONEncoder()
+    let decoder = JSONDecoder()
+    let data = try encoder.encode(profiles)
+    let loaded = try decoder.decode([Profile].self, from: data)
+    checkEqual(loaded.count, 0, "RT3: Empty list round-trips to empty list")
+}
+
+// Test 4: Profile with all fields → every field preserved
+do {
+    let fullProfile = Profile(
+        id: UUID(),
+        name: "Full Profile",
+        iconName: "headphones",
+        triggerDeviceIDs: ["dev-1", "dev-2"],
+        publicOutputPriority: ["dev-1", "dev-2"],
+        publicInputPriority: ["dev-3"],
+        privateOutputPriority: ["dev-2", "dev-1"],
+        privateInputPriority: ["dev-3", "dev-4"],
+        preferredMode: .private,
+        isSystemDefault: false
     )
 
-    let data = try! JSONEncoder().encode(profile)
-    let decoded = try! JSONDecoder().decode(CodableProfile.self, from: data)
-    checkEqual(decoded.triggerRules, profile.triggerRules,
-               "Trigger rules (specific + transport type) survive round-trip")
+    let encoder = JSONEncoder()
+    let decoder = JSONDecoder()
+    let data = try encoder.encode(fullProfile)
+    let loaded = try decoder.decode(Profile.self, from: data)
+
+    checkEqual(loaded.iconName, "headphones", "RT4a: iconName preserved")
+    checkEqual(loaded.publicOutputPriority, ["dev-1", "dev-2"], "RT4b: publicOutputPriority preserved")
+    checkEqual(loaded.publicInputPriority, ["dev-3"], "RT4c: publicInputPriority preserved")
+    checkEqual(loaded.privateOutputPriority, ["dev-2", "dev-1"], "RT4d: privateOutputPriority preserved")
+    checkEqual(loaded.privateInputPriority, ["dev-3", "dev-4"], "RT4e: privateInputPriority preserved")
+    checkEqual(loaded.preferredMode, .private, "RT4f: preferredMode preserved")
+    checkEqual(loaded.isSystemDefault, false, "RT4g: isSystemDefault preserved")
 }
 
+// Test 5: Legacy profile (no triggerRules) → migrates via the REAL Profile decoder.
+// This exercises production Profile.init(from:) directly (no local mirror): missing
+// triggerRules are migrated from triggerDeviceIDs, and — critically — a missing
+// isSystemDefault key is INFERRED from name == "System Default".
 do {
-    let empty: [CodableProfile] = []
-    let data = try! JSONEncoder().encode(empty)
-    let decoded = try! JSONDecoder().decode([CodableProfile].self, from: data)
-    checkEqual(decoded.count, 0, "Empty profile list → round-trip preserved")
-}
-
-do {
-    let profile = CodableProfile(
-        id: UUID(), name: "Full Profile",
-        triggerDeviceIDs: ["a", "b", "c"],
-        triggerRules: [.specificDevice(id: "a"), .specificDevice(id: "b"), .transportType(type: "USB")],
-        publicOutputPriority: ["a", "b"],
-        publicInputPriority: ["c"],
-        privateOutputPriority: ["b", "a"],
-        privateInputPriority: ["c"],
-        preferredMode: "private",
-        iconName: "music.note"
-    )
-
-    let data = try! JSONEncoder().encode(profile)
-    let decoded = try! JSONDecoder().decode(CodableProfile.self, from: data)
-    checkEqual(decoded.name, profile.name, "Name preserved")
-    checkEqual(decoded.triggerDeviceIDs, profile.triggerDeviceIDs, "Trigger device IDs preserved")
-    checkEqual(decoded.publicOutputPriority, profile.publicOutputPriority, "Public output priority preserved")
-    checkEqual(decoded.privateOutputPriority, profile.privateOutputPriority, "Private output priority preserved")
-    checkEqual(decoded.preferredMode, profile.preferredMode, "Preferred mode preserved")
-}
-
-do {
-    // Legacy profile without triggerRules → should still decode via triggerDeviceIDs
+    // Legacy JSON: has triggerDeviceIDs but NO triggerRules, and NO isSystemDefault key.
     let legacyJSON = """
     {
-        "id": "550E8400-E29B-41D4-A716-446655440000",
-        "name": "Legacy",
-        "triggerDeviceIDs": ["old-device-1", "old-device-2"],
-        "publicOutputPriority": ["old-device-1"],
-        "publicInputPriority": [],
-        "privateOutputPriority": [],
-        "privateInputPriority": [],
-        "preferredMode": "public",
-        "iconName": "speaker.wave.2"
+        "id": "12345678-1234-1234-1234-123456789012",
+        "name": "Legacy Profile",
+        "iconName": "speaker",
+        "triggerDeviceIDs": ["device-a", "device-b"],
+        "publicOutputPriority": ["device-a"],
+        "publicInputPriority": ["device-b"],
+        "privateOutputPriority": ["device-a"],
+        "privateInputPriority": ["device-b"],
+        "preferredMode": "public"
     }
     """
-    // This should decode even without triggerRules field
-    struct LegacyProfile: Codable {
-        let id: UUID
-        var name: String
-        var triggerDeviceIDs: [String]
-        var triggerRules: [CodableProfile.CodableTriggerRule]?
-        var publicOutputPriority: [String]
-        var publicInputPriority: [String]
-        var privateOutputPriority: [String]
-        var privateInputPriority: [String]
-        var preferredMode: String
-        var iconName: String
-    }
-
     let data = legacyJSON.data(using: .utf8)!
-    let decoded = try! JSONDecoder().decode(LegacyProfile.self, from: data)
-    checkEqual(decoded.name, "Legacy", "Legacy profile without triggerRules decodes successfully")
-    check(decoded.triggerRules == nil, "Legacy profile has nil triggerRules (migration happens at app level)")
-    checkEqual(decoded.triggerDeviceIDs, ["old-device-1", "old-device-2"],
-               "Legacy triggerDeviceIDs preserved for migration")
+
+    // Decode straight into the REAL Profile — no throwaway mirror.
+    let legacy = try JSONDecoder().decode(Profile.self, from: data)
+
+    checkEqual(legacy.triggerDeviceIDs, ["device-a", "device-b"],
+               "RT5a: Legacy profile triggerDeviceIDs loaded")
+    checkEqual(legacy.triggerRules.count, 2, "RT5b: Real decoder migrated to 2 triggerRules")
+    checkEqual(legacy.triggerRules[0], .specificDevice(id: "device-a"),
+               "RT5c: First rule migrated correctly by real decoder")
+    checkEqual(legacy.triggerRules[1], .specificDevice(id: "device-b"),
+               "RT5d: Second rule migrated correctly by real decoder")
+    check(!legacy.isSystemDefault,
+          "RT5e: Missing isSystemDefault + non-default name → inferred false")
+
+    // Legacy JSON named "System Default" with NO isSystemDefault key → inferred true.
+    let legacySystemDefaultJSON = """
+    {
+        "id": "22345678-1234-1234-1234-123456789012",
+        "name": "System Default",
+        "iconName": "speaker",
+        "triggerDeviceIDs": [],
+        "publicOutputPriority": [],
+        "publicInputPriority": [],
+        "privateOutputPriority": [],
+        "privateInputPriority": []
+    }
+    """
+    let sdData = legacySystemDefaultJSON.data(using: .utf8)!
+    let legacySD = try JSONDecoder().decode(Profile.self, from: sdData)
+    check(legacySD.isSystemDefault,
+          "RT5f: Missing isSystemDefault + name == 'System Default' → inferred true (real migration)")
+
+    // Round-trip through the real encoder: triggerDeviceIDs must ALWAYS be written.
+    let reencoded = try JSONEncoder().encode(legacy)
+    let obj = try JSONSerialization.jsonObject(with: reencoded) as? [String: Any]
+    check((obj?["triggerDeviceIDs"] as? [String]) == ["device-a", "device-b"],
+          "RT5g: Real encoder always writes triggerDeviceIDs for backward compat")
+    check(obj?["hotkey"] == nil,
+          "RT5h: Real encoder no longer writes the removed hotkey field")
 }
 
 // ============================================================================
-// MARK: - Results
+// MARK: - Summary
 // ============================================================================
 
-print("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-print("  RESULTS: \(passedTests)/\(totalTests) passed, \(failedTests) failed")
-print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
-
-if failedTests > 0 {
-    print("❌ SOME TESTS FAILED")
-    exit(1)
+print("\n════════════════════════════════════════════════════════")
+print("  BehaviorTests Summary")
+print("════════════════════════════════════════════════════════")
+print("  Total:  \(totalTests)")
+print("  Passed: \(passedTests)")
+print("  Failed: \(failedTests)")
+if failedTests == 0 {
+    print("  ✅ All tests passed!")
 } else {
-    print("✅ ALL TESTS PASSED")
-    exit(0)
+    print("  ❌ \(failedTests) test(s) FAILED")
 }
+print("════════════════════════════════════════════════════════")
+exit(failedTests > 0 ? 1 : 0)

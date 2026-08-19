@@ -1,285 +1,46 @@
-#!/usr/bin/env swift
+// SHARED: AudioProfiles/Models/AudioDevice.swift AudioProfiles/Models/ProfileMode.swift AudioProfiles/Models/Hotkey.swift AudioProfiles/Models/Profile.swift AudioProfiles/Models/DeviceHistoryEntry.swift AudioProfiles/Models/EQSettings.swift AudioProfiles/Models/EQSettings+Combine.swift AudioProfiles/Models/ContentMode.swift AudioProfiles/Models/ContentModeOverlay.swift AudioProfiles/Models/NightMode.swift AudioProfiles/Core/AudioCore.swift
 //
 // ModelAndServiceTests.swift
 //
 // Comprehensive unit tests for all models and pure-logic services.
-// Covers everything NOT tested by PipelineTests.swift and SharedAudioTests.swift:
 //
-//   1. NightModeConfig — quiet hours logic, midnight crossing, edge cases
-//   2. ContentModeType — enum properties, allCases
-//   3. ContentModeOverlay — default factory methods, enabled/disabled states
-//   4. (Removed — Hotkey feature removed)
-//   5. EQSettings — band mutation helpers, preamp, reset, frequency clamping
-//   6. EQPresetPEQ — filter parsing, type mapping, sort order
-//   7. Profile — Codable round-trip, legacy decode, isSystemDefault, priorityList
-//   8. AudioDevice — Codable round-trip, identity
-//   9. DeviceHistoryEntry — structure, date tracking
-//  10. DeviceFilterService logic — type filtering, exclusion, availability
-//  11. ProfileValidationService logic — cleanup, equality check, periodic cleanup
-//  12. AudioDeviceHistoryService logic — update, prune, previously-seen
-//  13. SoundModesStore logic — overlay computation, night mode stacking
-//  14. AudioPipelineService — state transition decision table
-//  15. EQ band Q-to-bandwidth conversion
+// These tests compile against the REAL production sources listed in the
+// `// SHARED:` directive above (see build.sh) — there are NO local mirrors of
+// model types or of logic that already lives in AudioProfiles/Core/AudioCore.swift.
+// A production regression therefore surfaces here as a compile error or a failure.
 //
-// Run: swift Tests/ModelAndServiceTests.swift
+// A small number of pure functions are still mirrored locally, and each is clearly
+// labeled: they reproduce logic that is real in production but not (yet) hoisted into
+// a Foundation-only shared file (DeviceFilterService filtering, AudioDeviceHistoryService
+// pruning / previously-seen queries, and the AudioPipelineService branch table).
+//
+// Covers:
+//   1.  NightModeConfig — quiet hours logic, midnight crossing, edge cases
+//   2.  ContentModeType — enum properties, allCases
+//   3.  ContentModeOverlay — default factory methods, enabled/disabled states
+//   5.  EQSettings — band mutation helpers, preamp, reset, frequency clamping
+//   6.  EQ band Q-to-bandwidth conversion
+//   7.  Profile — priorityList, isSystemDefault (real Codable decode path)
+//   8.  AudioDevice — identity
+//   9.  DeviceHistoryEntry — via AudioCore.updateDeviceHistory
+//  10.  DeviceFilterService logic — type filtering, exclusion, availability (local mirror)
+//  11.  ProfileValidationService logic — cleanup, equality (real triggerRules semantics)
+//  12.  AudioDeviceHistoryService logic — update (AudioCore), prune, previously-seen
+//  13.  SoundModesStore logic — activeOverlay computation (real fallback-to-default)
+//  14.  AudioPipelineService — branch decision table (local mirror)
+//  15.  AudioCore.shouldApplyTrigger — manual-override protection
+//  16.  AudioCore.findBestTriggerMatch — trigger matching + tie-break
+//
+// Run via build.sh (compiles this file together with the `// SHARED:` sources above).
 
 import Foundation
 
 // ============================================================================
-// MARK: - Lightweight model mirrors (no Core Audio dependency)
+// MARK: - DeviceFilterService logic (local mirror of DeviceFilterService)
 // ============================================================================
-
-enum EQFilterType: Int, Equatable {
-    case parametric = 0
-    case lowShelf   = 7
-    case highShelf  = 8
-
-    var label: String {
-        switch self {
-        case .parametric: return "PK"
-        case .lowShelf:   return "LS"
-        case .highShelf:  return "HS"
-        }
-    }
-}
-
-struct EQBand: Equatable {
-    var frequency: Float
-    var gain: Float
-    var bandwidth: Float
-    var filterType: EQFilterType
-
-    var isFlat: Bool { abs(gain) < 0.01 }
-
-    static func at(_ frequency: Float) -> EQBand {
-        EQBand(frequency: frequency, gain: 0, bandwidth: 1.0, filterType: .parametric)
-    }
-
-    static func qToBandwidth(_ q: Float) -> Float {
-        guard q > 0 else { return 1.0 }
-        let bw = Float((2.0 / log(2.0)) * asinh(1.0 / (2.0 * Double(q))))
-        return clamp(bw, 0.1...5.0)
-    }
-}
-
-struct EQSettings: Equatable {
-    static let standardFrequencies: [Float] = [32, 64, 125, 250, 500, 1_000, 2_000, 4_000, 8_000, 16_000]
-    static let gainRange: ClosedRange<Float>      = -12 ... 12
-    static let preampRange: ClosedRange<Float>    = -12 ... 12
-    static let bandwidthRange: ClosedRange<Float> = 0.1 ... 5.0
-    static let frequencyRange: ClosedRange<Float> = 20 ... 20_000
-
-    var preamp: Float
-    var bands: [EQBand]
-
-    var isFlat: Bool {
-        abs(preamp) < 0.01 && bands.allSatisfy(\.isFlat)
-    }
-
-    static var flat: EQSettings {
-        var bands = standardFrequencies.map { EQBand.at($0) }
-        bands[0].filterType = .lowShelf
-        bands[9].filterType = .highShelf
-        return EQSettings(preamp: 0, bands: bands)
-    }
-
-    func withBand(at index: Int, gain: Float) -> EQSettings {
-        guard index >= 0 && index < bands.count else { return self }
-        var copy = self
-        copy.bands[index].gain = clamp(gain, EQSettings.gainRange)
-        return copy
-    }
-
-    func withBand(at index: Int, bandwidth: Float) -> EQSettings {
-        guard index >= 0 && index < bands.count else { return self }
-        var copy = self
-        copy.bands[index].bandwidth = clamp(bandwidth, EQSettings.bandwidthRange)
-        return copy
-    }
-
-    func withBand(at index: Int, frequency: Float) -> EQSettings {
-        guard index >= 0 && index < bands.count else { return self }
-        let minFreq: Float = index > 0 ? bands[index - 1].frequency * 1.05 : EQSettings.frequencyRange.lowerBound
-        let maxFreq: Float = index < bands.count - 1 ? bands[index + 1].frequency * 0.95 : EQSettings.frequencyRange.upperBound
-        var copy = self
-        copy.bands[index].frequency = clamp(frequency, minFreq...maxFreq)
-        return copy
-    }
-
-    func withPreamp(_ value: Float) -> EQSettings {
-        var copy = self
-        copy.preamp = clamp(value, EQSettings.preampRange)
-        return copy
-    }
-
-    func reset() -> EQSettings { .flat }
-
-    static func combine(base: EQSettings, overlay: EQSettings) -> EQSettings {
-        guard !overlay.isFlat else { return base }
-        guard !base.isFlat else {
-            var result = overlay
-            for i in 0..<min(result.bands.count, base.bands.count) {
-                result.bands[i].filterType = base.bands[i].filterType
-                result.bands[i].bandwidth = base.bands[i].bandwidth
-                result.bands[i].frequency = base.bands[i].frequency
-            }
-            return result
-        }
-        var combined = base
-        combined.preamp = clamp(base.preamp + overlay.preamp, EQSettings.preampRange)
-        let count = min(base.bands.count, overlay.bands.count)
-        for i in 0..<count {
-            combined.bands[i].gain = clamp(base.bands[i].gain + overlay.bands[i].gain, EQSettings.gainRange)
-        }
-        return combined
-    }
-}
-
-enum ProfileMode: String, Equatable {
-    case `public`
-    case `private`
-}
-
-struct AudioDevice: Identifiable, Equatable {
-    let id: String
-    let name: String
-    let transportType: String
-    let isInput: Bool
-    let isOutput: Bool
-}
-
-struct Profile: Identifiable {
-    let id: UUID
-    var name: String
-    var iconName: String
-    var triggerDeviceIDs: [String]
-    var publicOutputPriority: [String]
-    var publicInputPriority: [String]
-    var privateOutputPriority: [String]
-    var privateInputPriority: [String]
-    var preferredMode: ProfileMode
-    var isSystemDefault: Bool = false
-
-    func priorityList(isOutput: Bool, mode: ProfileMode) -> [String] {
-        switch (isOutput, mode) {
-        case (true,  .public):  return publicOutputPriority
-        case (true,  .private): return privateOutputPriority
-        case (false, .public):  return publicInputPriority
-        case (false, .private): return privateInputPriority
-        }
-    }
-}
-
-enum ContentModeType: String, CaseIterable, Equatable {
-    case none, music, voice, movie, gaming
-
-    var displayName: String {
-        switch self {
-        case .none:    return "None"
-        case .music:   return "Music"
-        case .voice:   return "Voice"
-        case .movie:   return "Movie"
-        case .gaming:  return "Gaming"
-        }
-    }
-
-    var iconName: String {
-        switch self {
-        case .none:    return "waveform"
-        case .music:   return "music.note"
-        case .voice:   return "mic.fill"
-        case .movie:   return "film"
-        case .gaming:  return "gamecontroller.fill"
-        }
-    }
-}
-
-struct ContentModeOverlay: Equatable {
-    var mode: ContentModeType
-    var settings: EQSettings
-    var isEnabled: Bool
-
-    static func defaultVoice() -> ContentModeOverlay {
-        var bands = EQSettings.flat.bands
-        bands[0].gain = -2.0; bands[1].gain = -1.5; bands[2].gain = -1.0
-        bands[6].gain = +2.5; bands[7].gain = +2.0; bands[8].gain = +1.0
-        return ContentModeOverlay(mode: .voice, settings: EQSettings(preamp: 0, bands: bands), isEnabled: true)
-    }
-    static func defaultMovie() -> ContentModeOverlay {
-        var bands = EQSettings.flat.bands
-        bands[0].gain = +2.0; bands[1].gain = +1.5
-        bands[6].gain = +1.5; bands[7].gain = +1.0
-        return ContentModeOverlay(mode: .movie, settings: EQSettings(preamp: -1.0, bands: bands), isEnabled: true)
-    }
-    static func defaultGaming() -> ContentModeOverlay {
-        var bands = EQSettings.flat.bands
-        bands[0].gain = +1.5; bands[1].gain = +1.0; bands[5].gain = -0.5
-        bands[7].gain = +1.5; bands[8].gain = +1.0
-        return ContentModeOverlay(mode: .gaming, settings: EQSettings(preamp: -0.5, bands: bands), isEnabled: true)
-    }
-    static func defaultMusic() -> ContentModeOverlay {
-        ContentModeOverlay(mode: .music, settings: .flat, isEnabled: true)
-    }
-    static func defaultNone() -> ContentModeOverlay {
-        ContentModeOverlay(mode: .none, settings: .flat, isEnabled: true)
-    }
-    static func defaultOverlay(for mode: ContentModeType) -> ContentModeOverlay {
-        switch mode {
-        case .none:    return defaultNone()
-        case .music:   return defaultMusic()
-        case .voice:   return defaultVoice()
-        case .movie:   return defaultMovie()
-        case .gaming:  return defaultGaming()
-        }
-    }
-}
-
-struct NightModeConfig: Equatable {
-    var isEnabled: Bool = false
-    var startHour: Int = 22
-    var startMinute: Int = 0
-    var endHour: Int = 7
-    var endMinute: Int = 0
-    var overlay: EQSettings
-
-    static var `default`: NightModeConfig {
-        var bands = EQSettings.flat.bands
-        bands[0].gain = -4.0; bands[1].gain = -3.0; bands[2].gain = -1.5
-        bands[5].gain = +1.0; bands[6].gain = +1.5; bands[7].gain = +1.0
-        return NightModeConfig(overlay: EQSettings(preamp: 0, bands: bands))
-    }
-
-    func isInQuietHours(now: Date = Date()) -> Bool {
-        guard isEnabled else { return false }
-        let cal = Calendar.current
-        let hour = cal.component(.hour, from: now)
-        let minute = cal.component(.minute, from: now)
-        let currentMinutes = hour * 60 + minute
-        let startMinutes = startHour * 60 + self.startMinute
-        let endMinutes = endHour * 60 + self.endMinute
-
-        // start == end means "always on" (24h night mode)
-        if startMinutes == endMinutes { return true }
-
-        if startMinutes < endMinutes {
-            return currentMinutes >= startMinutes && currentMinutes < endMinutes
-        } else {
-            return currentMinutes >= startMinutes || currentMinutes < endMinutes
-        }
-    }
-}
-
-struct DeviceHistoryEntry {
-    let device: AudioDevice
-    var connectedAt: Date
-    var lastSeen: Date
-    var isCurrentlyActive: Bool
-}
-
-
-// ============================================================================
-// MARK: - DeviceFilterService logic (extracted for testing)
-// ============================================================================
+// Real code: AudioProfiles/Services/DeviceFilterService.swift (@MainActor, Core-Audio
+// backed — not Foundation-only, so mirrored here). Faithful to filterByType /
+// excludeSelected / getAvailableDevices(isInput:excludingIDs:includeHistorical:).
 
 func filterByType(_ devices: [AudioDevice], isInput: Bool) -> [AudioDevice] {
     devices.filter { isInput ? $0.isInput : $0.isOutput }
@@ -306,67 +67,14 @@ func getAvailableDevices(
 }
 
 // ============================================================================
-// MARK: - ProfileValidationService logic (extracted for testing)
+// MARK: - AudioDeviceHistoryService logic (local mirror — pruning / previously-seen)
 // ============================================================================
-
-func cleanupInvalidDevices(in profile: Profile, knownDeviceIDs: Set<String>) -> Profile {
-    var p = profile
-    p.triggerDeviceIDs = profile.triggerDeviceIDs.filter { knownDeviceIDs.contains($0) }
-    p.publicOutputPriority = profile.publicOutputPriority.filter { knownDeviceIDs.contains($0) }
-    p.publicInputPriority = profile.publicInputPriority.filter { knownDeviceIDs.contains($0) }
-    p.privateOutputPriority = profile.privateOutputPriority.filter { knownDeviceIDs.contains($0) }
-    p.privateInputPriority = profile.privateInputPriority.filter { knownDeviceIDs.contains($0) }
-    return p
-}
-
-func profilesEqual(_ p1: [Profile], _ p2: [Profile]) -> Bool {
-    guard p1.count == p2.count else { return false }
-    for (a, b) in zip(p1, p2) {
-        if a.id != b.id ||
-           a.triggerDeviceIDs != b.triggerDeviceIDs ||
-           a.publicOutputPriority != b.publicOutputPriority ||
-           a.privateOutputPriority != b.privateOutputPriority ||
-           a.publicInputPriority != b.publicInputPriority ||
-           a.privateInputPriority != b.privateInputPriority { return false }
-    }
-    return true
-}
-
-// ============================================================================
-// MARK: - AudioDeviceHistoryService logic (extracted for testing)
-// ============================================================================
-
-func performHistoryUpdate(
-    _ currentHistory: [String: DeviceHistoryEntry],
-    with devices: [AudioDevice],
-    now: Date = Date()
-) -> [String: DeviceHistoryEntry] {
-    var updated = currentHistory
-    let currentIDs = Set(devices.map { $0.id })
-
-    for device in devices {
-        // connectedAt advances only on a disconnected → connected transition
-        // (new device, or one that was previously inactive); otherwise it is
-        // preserved so unrelated device events don't refresh it.
-        let existing = updated[device.id]
-        let wasActive = existing?.isCurrentlyActive ?? false
-        let connectedAt = wasActive ? (existing?.connectedAt ?? now) : now
-        updated[device.id] = DeviceHistoryEntry(
-            device: device,
-            connectedAt: connectedAt,
-            lastSeen: now,
-            isCurrentlyActive: true
-        )
-    }
-    for (id, var entry) in updated {
-        if !currentIDs.contains(id) && entry.isCurrentlyActive {
-            entry.isCurrentlyActive = false
-            updated[id] = entry
-        }
-    }
-    return updated
-}
-
+// Real code: AudioProfiles/Services/AudioDeviceHistoryService.swift. The connectedAt/
+// lastSeen bookkeeping lives in AudioCore.updateDeviceHistory (shared, exercised directly).
+// Pruning and previously-seen filtering are @MainActor + singleton-bound in production, so
+// their pure shape is mirrored here.
+//
+// pruneDeviceHistory: drop entries older than the cutoff UNLESS referenced by a profile.
 func pruneHistory(
     _ history: [String: DeviceHistoryEntry],
     olderThan cutoff: Date,
@@ -377,6 +85,7 @@ func pruneHistory(
     }
 }
 
+// getPreviouslySeenDevices: not-currently-active, not in current list, seen within window.
 func getPreviouslySeen(
     history: [String: DeviceHistoryEntry],
     excluding currentDevices: [AudioDevice],
@@ -390,9 +99,13 @@ func getPreviouslySeen(
 }
 
 // ============================================================================
-// MARK: - SoundModesStore logic — activeOverlay computation
+// MARK: - SoundModesStore.activeOverlay (local mirror — matches production fallback)
 // ============================================================================
-
+// Real code: AudioProfiles/Services/SoundModesStore.swift (activeOverlay + overlay(for:)).
+// Key production behavior reproduced faithfully: a MISSING overlay for a mode falls back to
+// that mode's DEFAULT overlay (ContentModeOverlay.defaultOverlay(for:)), NOT to flat. An
+// overlay that is present but disabled contributes flat. Night mode combines via the real
+// EQSettings.combine and operates independently of the content-modes master toggle.
 func computeActiveOverlay(
     isEnabled: Bool,
     activeContentMode: ContentModeType,
@@ -400,17 +113,14 @@ func computeActiveOverlay(
     isNightModeActive: Bool,
     nightMode: NightModeConfig
 ) -> EQSettings {
-    let contentEQ: EQSettings
-    if isEnabled {
-        let overlay = overlays[activeContentMode]
-        if let o = overlay, o.isEnabled {
-            contentEQ = o.settings
-        } else {
-            contentEQ = .flat
-        }
-    } else {
-        contentEQ = .flat
+    // overlay(for:) — fall back to the mode's default when unset.
+    func overlay(for mode: ContentModeType) -> EQSettings {
+        let o = overlays[mode] ?? ContentModeOverlay.defaultOverlay(for: mode)
+        return o.isEnabled ? o.settings : .flat
     }
+
+    let contentEQ: EQSettings = isEnabled ? overlay(for: activeContentMode) : .flat
+
     if nightMode.isEnabled && isNightModeActive {
         return EQSettings.combine(base: contentEQ, overlay: nightMode.overlay)
     }
@@ -418,8 +128,11 @@ func computeActiveOverlay(
 }
 
 // ============================================================================
-// MARK: - AudioPipelineService decision table
+// MARK: - AudioPipelineService decision table (local mirror)
 // ============================================================================
+// Real code: AudioProfiles/Services/AudioPipelineService.applyEQState (routes to
+// EQEngineService.hotUpdate / switchDevice / startPipeline / stop / direct set). That
+// service is not Foundation-only, so its branch structure is mirrored here.
 
 enum PipelineAction: Equatable {
     case hotUpdate(EQSettings)
@@ -464,10 +177,6 @@ func decidePipelineAction(
 // MARK: - Test infrastructure
 // ============================================================================
 
-func clamp(_ value: Float, _ range: ClosedRange<Float>) -> Float {
-    max(range.lowerBound, min(range.upperBound, value))
-}
-
 var totalTests = 0
 var passedTests = 0
 var failedTests = 0
@@ -501,6 +210,70 @@ func makeTime(hour: Int, minute: Int) -> Date {
     var c = Calendar.current.dateComponents([.year, .month, .day], from: Date())
     c.hour = hour; c.minute = minute; c.second = 0
     return Calendar.current.date(from: c)!
+}
+
+// Convenience: a DeviceHistoryEntry using the real initializer signature
+// (device:lastSeen:connectedAt:isCurrentlyActive:).
+func entry(_ device: AudioDevice, connectedAt: Date, lastSeen: Date, active: Bool) -> DeviceHistoryEntry {
+    DeviceHistoryEntry(device: device, lastSeen: lastSeen, connectedAt: connectedAt, isCurrentlyActive: active)
+}
+
+// Convenience: build a Profile with the common defaults (mirrors the real memberwise init).
+func makeProfile(
+    id: UUID = UUID(),
+    name: String = "Test",
+    iconName: String = "gear",
+    triggerDeviceIDs: [String] = [],
+    triggerRules: [TriggerRule]? = nil,
+    publicOutputPriority: [String] = [],
+    publicInputPriority: [String] = [],
+    privateOutputPriority: [String] = [],
+    privateInputPriority: [String] = [],
+    preferredMode: ProfileMode = .public,
+    isSystemDefault: Bool = false
+) -> Profile {
+    Profile(
+        id: id, name: name, iconName: iconName,
+        triggerDeviceIDs: triggerDeviceIDs, triggerRules: triggerRules,
+        publicOutputPriority: publicOutputPriority, publicInputPriority: publicInputPriority,
+        privateOutputPriority: privateOutputPriority, privateInputPriority: privateInputPriority,
+        preferredMode: preferredMode, isSystemDefault: isSystemDefault
+    )
+}
+
+// Real ProfileValidationService.cleanupInvalidDevices, reproduced as a pure function over an
+// explicit "known device IDs" set (production consults AudioDeviceHistoryService.shared, which
+// is @MainActor). It filters triggerRules (keeping class rules), RE-DERIVES triggerDeviceIDs
+// from the surviving rules, and filters every priority list.
+func cleanupInvalidDevices(in profile: Profile, knownDeviceIDs: Set<String>) -> Profile {
+    var p = profile
+    p.triggerRules = profile.triggerRules.filter { rule in
+        switch rule {
+        case .specificDevice(let id): return knownDeviceIDs.contains(id)
+        case .transportType:          return true  // class rules always valid
+        }
+    }
+    p.triggerDeviceIDs = TriggerRule.deriveDeviceIDs(from: p.triggerRules)
+    p.publicOutputPriority  = profile.publicOutputPriority.filter { knownDeviceIDs.contains($0) }
+    p.publicInputPriority   = profile.publicInputPriority.filter { knownDeviceIDs.contains($0) }
+    p.privateOutputPriority = profile.privateOutputPriority.filter { knownDeviceIDs.contains($0) }
+    p.privateInputPriority  = profile.privateInputPriority.filter { knownDeviceIDs.contains($0) }
+    return p
+}
+
+// Real ProfileValidationService.profilesEqual: compares id, triggerRules (the source of
+// truth — NOT the derived triggerDeviceIDs), and all four priority lists.
+func profilesEqual(_ p1: [Profile], _ p2: [Profile]) -> Bool {
+    guard p1.count == p2.count else { return false }
+    for (a, b) in zip(p1, p2) {
+        if a.id != b.id ||
+           a.triggerRules != b.triggerRules ||
+           a.publicOutputPriority != b.publicOutputPriority ||
+           a.privateOutputPriority != b.privateOutputPriority ||
+           a.publicInputPriority != b.publicInputPriority ||
+           a.privateInputPriority != b.privateInputPriority { return false }
+    }
+    return true
 }
 
 // ============================================================================
@@ -674,11 +447,7 @@ do {
 }
 
 // ============================================================================
-// MARK: - 4. (Removed — Hotkey feature removed)
-// ============================================================================
-
-// ============================================================================
-// MARK: - 6. EQSettings — Band Mutation Helpers
+// MARK: - 5. EQSettings — Band Mutation Helpers
 // ============================================================================
 
 section("EQSettings — Band Mutation Helpers")
@@ -786,7 +555,7 @@ do {
 }
 
 // ============================================================================
-// MARK: - 7. EQ Q-to-Bandwidth Conversion
+// MARK: - 6. EQ Q-to-Bandwidth Conversion
 // ============================================================================
 
 section("EQ Band — Q to Bandwidth Conversion")
@@ -828,7 +597,7 @@ do {
 }
 
 // ============================================================================
-// MARK: - 8. EQFilterType — Labels
+// MARK: - EQFilterType — Labels
 // ============================================================================
 
 section("EQFilterType — Labels")
@@ -846,7 +615,7 @@ do {
 }
 
 // ============================================================================
-// MARK: - 9. NightModeConfig — Default Values
+// MARK: - NightModeConfig — Default Values
 // ============================================================================
 
 section("NightModeConfig — Default Overlay")
@@ -952,25 +721,27 @@ do {
 }
 
 // ============================================================================
-// MARK: - 12. ProfileValidationService — Cleanup
+// MARK: - 12. ProfileValidationService — Cleanup (real triggerRules semantics)
 // ============================================================================
 
 section("ProfileValidationService — Cleanup")
 
 do {
-    let profile = Profile(
-        id: UUID(), name: "Test",
-        iconName: "speaker", triggerDeviceIDs: ["known-uid", "unknown-uid"],
+    // triggerRules is the source of truth; specificDevice rules for unknown devices
+    // are dropped, and triggerDeviceIDs is RE-DERIVED from the survivors.
+    let profile = makeProfile(
+        name: "Test",
+        triggerDeviceIDs: ["known-uid", "unknown-uid"],
         publicOutputPriority: ["known-uid", "gone-uid"],
         publicInputPriority: ["known-uid"],
         privateOutputPriority: ["unknown-uid"],
-        privateInputPriority: [],
-        preferredMode: .public
+        privateInputPriority: []
     )
     let known: Set<String> = ["known-uid"]
     let cleaned = cleanupInvalidDevices(in: profile, knownDeviceIDs: known)
 
-    checkEqual(cleaned.triggerDeviceIDs, ["known-uid"], "Removed unknown trigger")
+    checkEqual(cleaned.triggerRules, [.specificDevice(id: "known-uid")], "Removed unknown trigger rule")
+    checkEqual(cleaned.triggerDeviceIDs, ["known-uid"], "triggerDeviceIDs re-derived from surviving rules")
     checkEqual(cleaned.publicOutputPriority, ["known-uid"], "Removed unknown output")
     checkEqual(cleaned.publicInputPriority, ["known-uid"], "Kept known input")
     checkEqual(cleaned.privateOutputPriority, [], "Removed all unknown private output")
@@ -978,14 +749,25 @@ do {
 }
 
 do {
-    let profile = Profile(
-        id: UUID(), name: "All Known",
-        iconName: "speaker", triggerDeviceIDs: ["a", "b"],
+    // Transport-class rules are ALWAYS valid — they survive cleanup even when no device
+    // of that class is currently known.
+    let profile = makeProfile(
+        name: "Class rule",
+        triggerRules: [.transportType(type: "Bluetooth"), .specificDevice(id: "unknown-uid")]
+    )
+    let cleaned = cleanupInvalidDevices(in: profile, knownDeviceIDs: [])
+    checkEqual(cleaned.triggerRules, [.transportType(type: "Bluetooth")], "Class rule kept, unknown specific rule dropped")
+    checkEqual(cleaned.triggerDeviceIDs, [], "Class-only rules derive no triggerDeviceIDs")
+}
+
+do {
+    let profile = makeProfile(
+        name: "All Known",
+        triggerDeviceIDs: ["a", "b"],
         publicOutputPriority: ["a", "b"],
         publicInputPriority: ["a"],
         privateOutputPriority: ["b"],
-        privateInputPriority: ["a"],
-        preferredMode: .public
+        privateInputPriority: ["a"]
     )
     let known: Set<String> = ["a", "b"]
     let cleaned = cleanupInvalidDevices(in: profile, knownDeviceIDs: known)
@@ -994,38 +776,42 @@ do {
 }
 
 // ============================================================================
-// MARK: - 13. ProfileValidationService — profilesEqual
+// MARK: - 13. ProfileValidationService — profilesEqual (compares triggerRules)
 // ============================================================================
 
 section("ProfileValidationService — profilesEqual")
 
 do {
     let id = UUID()
-    let p = Profile(id: id, name: "A", iconName: "x", triggerDeviceIDs: ["a"],
-                    publicOutputPriority: ["a"], publicInputPriority: [],
-                    privateOutputPriority: [], privateInputPriority: [],
-                    preferredMode: .public)
+    let p = makeProfile(id: id, name: "A", iconName: "x", triggerDeviceIDs: ["a"],
+                        publicOutputPriority: ["a"])
     check(profilesEqual([p], [p]), "Same profile → equal")
 }
 
 do {
     let id = UUID()
-    let p1 = Profile(id: id, name: "A", iconName: "x", triggerDeviceIDs: ["a"],
-                     publicOutputPriority: ["a"], publicInputPriority: [],
-                     privateOutputPriority: [], privateInputPriority: [],
-                     preferredMode: .public)
-    let p2 = Profile(id: id, name: "A", iconName: "x", triggerDeviceIDs: ["a", "b"],
-                     publicOutputPriority: ["a"], publicInputPriority: [],
-                     privateOutputPriority: [], privateInputPriority: [],
-                     preferredMode: .public)
-    check(!profilesEqual([p1], [p2]), "Different triggers → not equal")
+    let p1 = makeProfile(id: id, name: "A", iconName: "x", triggerDeviceIDs: ["a"],
+                         publicOutputPriority: ["a"])
+    let p2 = makeProfile(id: id, name: "A", iconName: "x", triggerDeviceIDs: ["a", "b"],
+                         publicOutputPriority: ["a"])
+    check(!profilesEqual([p1], [p2]), "Different triggerRules → not equal")
 }
 
 do {
-    check(!profilesEqual([], [Profile(id: UUID(), name: "A", iconName: "x",
-                                      triggerDeviceIDs: [], publicOutputPriority: [],
-                                      publicInputPriority: [], privateOutputPriority: [],
-                                      privateInputPriority: [], preferredMode: .public)]),
+    // Same triggerDeviceIDs but different triggerRules (one has an extra class rule)
+    // → NOT equal, because equality is on the rule set, not the derived IDs.
+    let id = UUID()
+    let p1 = makeProfile(id: id, name: "A", iconName: "x",
+                         triggerRules: [.specificDevice(id: "a")], publicOutputPriority: ["a"])
+    let p2 = makeProfile(id: id, name: "A", iconName: "x",
+                         triggerRules: [.specificDevice(id: "a"), .transportType(type: "USB")],
+                         publicOutputPriority: ["a"])
+    checkEqual(p1.triggerDeviceIDs, p2.triggerDeviceIDs, "Derived triggerDeviceIDs identical (class rule adds none)")
+    check(!profilesEqual([p1], [p2]), "Different triggerRules (class rule added) → not equal")
+}
+
+do {
+    check(!profilesEqual([], [makeProfile(name: "A", iconName: "x")]),
           "Different count → not equal")
 }
 
@@ -1034,7 +820,7 @@ do {
 }
 
 // ============================================================================
-// MARK: - 14. AudioDeviceHistoryService — Update Logic
+// MARK: - 14. AudioDeviceHistoryService — Update Logic (AudioCore, real entries)
 // ============================================================================
 
 section("AudioDeviceHistoryService — Update Logic")
@@ -1042,7 +828,7 @@ section("AudioDeviceHistoryService — Update Logic")
 do {
     let now = Date()
     let devices = [speakers, headphones]
-    let history = performHistoryUpdate([:], with: devices, now: now)
+    let history = AudioCore.updateDeviceHistory([:], with: devices, now: now)
 
     checkEqual(history.count, 2, "Two entries after first update")
     check(history["speakers-uid"]!.isCurrentlyActive, "Speakers active")
@@ -1054,14 +840,14 @@ do {
     let t1 = now.addingTimeInterval(-3600)  // 1 hour ago
 
     // First update: speakers + headphones
-    var history = performHistoryUpdate([:], with: [speakers, headphones], now: t1)
+    var history = AudioCore.updateDeviceHistory([:], with: [speakers, headphones], now: t1)
 
     // Second update: only speakers (headphones disconnected)
-    history = performHistoryUpdate(history, with: [speakers], now: now)
+    history = AudioCore.updateDeviceHistory(history, with: [speakers], now: now)
 
     check(history["speakers-uid"]!.isCurrentlyActive, "Speakers still active")
     check(!history["beyerdynamic-uid"]!.isCurrentlyActive, "Headphones marked inactive")
-    checkEqual(history["beyerdynamic-uid"]!.lastSeen, t1, "Headphones lastSeen = first update time")
+    checkEqual(history["beyerdynamic-uid"]!.lastSeen, t1, "Headphones lastSeen = first update time (not refreshed while absent)")
     checkEqual(history["speakers-uid"]!.lastSeen, now, "Speakers lastSeen = now")
 }
 
@@ -1070,15 +856,15 @@ do {
     let t1 = Date().addingTimeInterval(-7200)
     let t2 = Date()
 
-    var history = performHistoryUpdate([:], with: [speakers], now: t1)
-    history = performHistoryUpdate(history, with: [speakers], now: t2)
+    var history = AudioCore.updateDeviceHistory([:], with: [speakers], now: t1)
+    history = AudioCore.updateDeviceHistory(history, with: [speakers], now: t2)
 
     checkEqual(history["speakers-uid"]!.connectedAt, t1, "connectedAt preserved from first update")
     checkEqual(history["speakers-uid"]!.lastSeen, t2, "lastSeen updated")
 }
 
 // ============================================================================
-// MARK: - 15. AudioDeviceHistoryService — Pruning
+// MARK: - 15. AudioDeviceHistoryService — Pruning (local mirror)
 // ============================================================================
 
 section("AudioDeviceHistoryService — Pruning")
@@ -1089,8 +875,8 @@ do {
     let recent = now.addingTimeInterval(-1 * 24 * 3600)  // 1 day ago
 
     let history: [String: DeviceHistoryEntry] = [
-        "old-uid": DeviceHistoryEntry(device: speakers, connectedAt: old, lastSeen: old, isCurrentlyActive: false),
-        "recent-uid": DeviceHistoryEntry(device: headphones, connectedAt: recent, lastSeen: recent, isCurrentlyActive: false),
+        "old-uid": entry(speakers, connectedAt: old, lastSeen: old, active: false),
+        "recent-uid": entry(headphones, connectedAt: recent, lastSeen: recent, active: false),
     ]
     let cutoff = now.addingTimeInterval(-30 * 24 * 3600)
     let pruned = pruneHistory(history, olderThan: cutoff)
@@ -1106,17 +892,16 @@ do {
     checkEqual(pruned.count, 0, "Empty history → empty after prune")
 }
 
-// Regression: pruneHistory must work without profile data (no singleton dependency).
+// Regression: pruneDeviceHistory must work without profile data (no singleton dependency).
 // The real bug: AudioDeviceHistoryService.pruneDeviceHistory() accessed
 // ProfileManager.shared during its own init, causing a dispatch_once deadlock.
-// The fix: pruneHistory takes profileReferencedIDs as an explicit parameter.
-// This test verifies pruning works correctly with an EMPTY referenced set
+// The fix: profileReferencedIDs is an explicit input; pruning works with an EMPTY set
 // (the state during init, before profiles are loaded).
 do {
     let now = Date()
     let old = now.addingTimeInterval(-31 * 24 * 3600)
     let history: [String: DeviceHistoryEntry] = [
-        "old-uid": DeviceHistoryEntry(device: speakers, connectedAt: old, lastSeen: old, isCurrentlyActive: false),
+        "old-uid": entry(speakers, connectedAt: old, lastSeen: old, active: false),
     ]
     let cutoff = now.addingTimeInterval(-30 * 24 * 3600)
     // With empty profileReferencedIDs (simulates init-time state), old device IS pruned
@@ -1128,7 +913,7 @@ do {
     checkEqual(prunedProtected.count, 1, "Pruning with profileReferencedIDs protects the device")
 }
 
-// Verify the pure function signature enforces no singleton dependency
+// Verify the pure function shape enforces no singleton dependency
 // (profileReferencedIDs is a parameter, not fetched from ProfileManager.shared)
 do {
     let now = Date()
@@ -1136,9 +921,9 @@ do {
     let old = now.addingTimeInterval(-31 * 24 * 3600)
     let cutoff = now.addingTimeInterval(-30 * 24 * 3600)
     let history: [String: DeviceHistoryEntry] = [
-        "protected-uid": DeviceHistoryEntry(device: speakers, connectedAt: old, lastSeen: old, isCurrentlyActive: false),
-        "unprotected-uid": DeviceHistoryEntry(device: headphones, connectedAt: old, lastSeen: old, isCurrentlyActive: false),
-        "recent-uid": DeviceHistoryEntry(device: builtinOutput, connectedAt: recent, lastSeen: recent, isCurrentlyActive: false),
+        "protected-uid": entry(speakers, connectedAt: old, lastSeen: old, active: false),
+        "unprotected-uid": entry(headphones, connectedAt: old, lastSeen: old, active: false),
+        "recent-uid": entry(builtinOutput, connectedAt: recent, lastSeen: recent, active: false),
     ]
     let pruned = pruneHistory(history, olderThan: cutoff, profileReferencedIDs: ["protected-uid"])
     checkEqual(pruned.count, 2, "Protected + recent survive, unprotected pruned")
@@ -1148,7 +933,7 @@ do {
 }
 
 // ============================================================================
-// MARK: - 16. AudioDeviceHistoryService — Previously Seen
+// MARK: - 16. AudioDeviceHistoryService — Previously Seen (local mirror)
 // ============================================================================
 
 section("AudioDeviceHistoryService — Previously Seen Devices")
@@ -1159,8 +944,8 @@ do {
     let cutoff = now.addingTimeInterval(-30 * 24 * 3600)
 
     let history: [String: DeviceHistoryEntry] = [
-        "speakers-uid": DeviceHistoryEntry(device: speakers, connectedAt: recent, lastSeen: recent, isCurrentlyActive: true),
-        "beyerdynamic-uid": DeviceHistoryEntry(device: headphones, connectedAt: recent, lastSeen: recent, isCurrentlyActive: false),
+        "speakers-uid": entry(speakers, connectedAt: recent, lastSeen: recent, active: true),
+        "beyerdynamic-uid": entry(headphones, connectedAt: recent, lastSeen: recent, active: false),
     ]
 
     let previous = getPreviouslySeen(history: history, excluding: [speakers], cutoff: cutoff)
@@ -1174,7 +959,7 @@ do {
     let cutoff = now.addingTimeInterval(-30 * 24 * 3600)
 
     let history: [String: DeviceHistoryEntry] = [
-        "old-uid": DeviceHistoryEntry(device: headphones, connectedAt: old, lastSeen: old, isCurrentlyActive: false),
+        "old-uid": entry(headphones, connectedAt: old, lastSeen: old, active: false),
     ]
 
     let previous = getPreviouslySeen(history: history, excluding: [], cutoff: cutoff)
@@ -1187,7 +972,7 @@ do {
     let cutoff = now.addingTimeInterval(-30 * 24 * 3600)
 
     let history: [String: DeviceHistoryEntry] = [
-        "speakers-uid": DeviceHistoryEntry(device: speakers, connectedAt: now, lastSeen: now, isCurrentlyActive: true),
+        "speakers-uid": entry(speakers, connectedAt: now, lastSeen: now, active: true),
     ]
 
     let previous = getPreviouslySeen(history: history, excluding: [], cutoff: cutoff)
@@ -1277,19 +1062,35 @@ do {
 }
 
 do {
-    // Missing overlay for mode → flat content, night stacks if active
+    // BEHAVIOR FIX: a MISSING overlay for the active mode falls back to that mode's
+    // DEFAULT overlay (production SoundModesStore.overlay(for:)), NOT to flat. The old
+    // local mirror wrongly returned flat here. Gaming's default overlay is non-flat.
     let result = computeActiveOverlay(
         isEnabled: true,
         activeContentMode: .gaming,
-        overlays: [:],  // No overlays configured
+        overlays: [:],  // No overlays configured → default overlay used
         isNightModeActive: false,
         nightMode: .default
     )
-    check(result.isFlat, "No overlay configured → flat")
+    check(!result.isFlat, "No overlay configured → falls back to mode's default (gaming default is non-flat)")
+    checkEqual(result.bands[0].gain, ContentModeOverlay.defaultGaming().settings.bands[0].gain,
+               "Missing gaming overlay resolves to defaultGaming()")
+}
+
+do {
+    // Corollary: a missing overlay for a mode whose DEFAULT is flat (music) → flat.
+    let result = computeActiveOverlay(
+        isEnabled: true,
+        activeContentMode: .music,
+        overlays: [:],
+        isNightModeActive: false,
+        nightMode: .default
+    )
+    check(result.isFlat, "Missing music overlay → defaultMusic() which is flat")
 }
 
 // ============================================================================
-// MARK: - 18. AudioPipelineService — Decision Table
+// MARK: - 18. AudioPipelineService — Decision Table (local mirror)
 // ============================================================================
 
 section("AudioPipelineService — Decision Table")
@@ -1393,35 +1194,120 @@ do {
 }
 
 // ============================================================================
-// MARK: - 20. Profile — isSystemDefault
+// MARK: - 20. Profile — isSystemDefault (REAL Codable decode path)
 // ============================================================================
 
 section("Profile — isSystemDefault Detection")
 
 do {
-    let sd = Profile(id: UUID(), name: "System Default", iconName: "gear",
-                     triggerDeviceIDs: [], publicOutputPriority: [],
-                     publicInputPriority: [], privateOutputPriority: [],
-                     privateInputPriority: [], preferredMode: .public,
-                     isSystemDefault: true)
-    check(sd.isSystemDefault, "System Default → true")
+    let sd = makeProfile(name: "System Default", iconName: "gear", isSystemDefault: true)
+    check(sd.isSystemDefault, "Explicit isSystemDefault: true → true")
 }
 
 do {
-    let p = Profile(id: UUID(), name: "Home Studio", iconName: "house",
-                    triggerDeviceIDs: [], publicOutputPriority: [],
-                    publicInputPriority: [], privateOutputPriority: [],
-                    privateInputPriority: [], preferredMode: .public)
-    check(!p.isSystemDefault, "Home Studio → false")
+    let p = makeProfile(name: "Home Studio", iconName: "house")
+    check(!p.isSystemDefault, "Home Studio (memberwise, default false) → false")
 }
 
 do {
-    // Stored flag defaults to false
-    let p = Profile(id: UUID(), name: "system default", iconName: "gear",
-                    triggerDeviceIDs: [], publicOutputPriority: [],
-                    publicInputPriority: [], privateOutputPriority: [],
-                    privateInputPriority: [], preferredMode: .public)
-    check(!p.isSystemDefault, "Stored flag defaults to false")
+    // REAL decode behavior: Profile.init(from:) defaults isSystemDefault, when the key
+    // is ABSENT, to (name == "System Default"). This is the shipped legacy-migration path,
+    // so we test it against the real Codable implementation.
+    let json = """
+    {
+      "id": "\(UUID().uuidString)",
+      "name": "System Default",
+      "iconName": "gear",
+      "triggerDeviceIDs": [],
+      "publicOutputPriority": [],
+      "publicInputPriority": [],
+      "privateOutputPriority": [],
+      "privateInputPriority": [],
+      "preferredMode": "public"
+    }
+    """.data(using: .utf8)!
+    let decoded = try! JSONDecoder().decode(Profile.self, from: json)
+    check(decoded.isSystemDefault, "Legacy decode: absent key + name 'System Default' → true")
+}
+
+do {
+    // Absent key + a name that is NOT exactly "System Default" → false.
+    let json = """
+    {
+      "id": "\(UUID().uuidString)",
+      "name": "Home Studio",
+      "iconName": "gear",
+      "triggerDeviceIDs": [],
+      "publicOutputPriority": [],
+      "publicInputPriority": [],
+      "privateOutputPriority": [],
+      "privateInputPriority": [],
+      "preferredMode": "public"
+    }
+    """.data(using: .utf8)!
+    let decoded = try! JSONDecoder().decode(Profile.self, from: json)
+    check(!decoded.isSystemDefault, "Legacy decode: absent key + other name → false")
+}
+
+do {
+    // Present key wins over the name heuristic: name matches but flag is explicitly false.
+    let json = """
+    {
+      "id": "\(UUID().uuidString)",
+      "name": "System Default",
+      "iconName": "gear",
+      "triggerDeviceIDs": [],
+      "publicOutputPriority": [],
+      "publicInputPriority": [],
+      "privateOutputPriority": [],
+      "privateInputPriority": [],
+      "preferredMode": "public",
+      "isSystemDefault": false
+    }
+    """.data(using: .utf8)!
+    let decoded = try! JSONDecoder().decode(Profile.self, from: json)
+    check(!decoded.isSystemDefault, "Explicit isSystemDefault:false overrides the name heuristic")
+}
+
+// ============================================================================
+// MARK: - 20b. Profile — Codable round-trip & legacy triggerDeviceIDs migration
+// ============================================================================
+
+section("Profile — Codable round-trip & migration")
+
+do {
+    // Round-trip preserves triggerRules and re-derives triggerDeviceIDs.
+    let original = makeProfile(
+        name: "RT",
+        triggerRules: [.specificDevice(id: "a"), .transportType(type: "USB")],
+        publicOutputPriority: ["a", "b"]
+    )
+    let data = try! JSONEncoder().encode(original)
+    let decoded = try! JSONDecoder().decode(Profile.self, from: data)
+    checkEqual(decoded.triggerRules, original.triggerRules, "triggerRules survive round-trip")
+    checkEqual(decoded.triggerDeviceIDs, ["a"], "triggerDeviceIDs re-derived (class rule adds none)")
+    checkEqual(decoded.publicOutputPriority, ["a", "b"], "priority list survives round-trip")
+}
+
+do {
+    // Legacy decode: no triggerRules key, only triggerDeviceIDs → migrated to specificDevice rules.
+    let json = """
+    {
+      "id": "\(UUID().uuidString)",
+      "name": "Legacy",
+      "iconName": "gear",
+      "triggerDeviceIDs": ["x", "y"],
+      "publicOutputPriority": [],
+      "publicInputPriority": [],
+      "privateOutputPriority": [],
+      "privateInputPriority": [],
+      "preferredMode": "public"
+    }
+    """.data(using: .utf8)!
+    let decoded = try! JSONDecoder().decode(Profile.self, from: json)
+    checkEqual(decoded.triggerRules, [.specificDevice(id: "x"), .specificDevice(id: "y")],
+               "Legacy triggerDeviceIDs migrate to specificDevice rules")
+    checkEqual(decoded.triggerDeviceIDs, ["x", "y"], "Derived triggerDeviceIDs preserved")
 }
 
 // ============================================================================
@@ -1502,15 +1388,24 @@ do {
 }
 
 do {
+    // AudioDevice is Codable (not Equatable in production); compare fields.
     let d1 = AudioDevice(id: "same-uid", name: "Device A", transportType: "USB", isInput: false, isOutput: true)
     let d2 = AudioDevice(id: "same-uid", name: "Device A", transportType: "USB", isInput: false, isOutput: true)
-    check(d1 == d2, "Same properties → equal")
+    check(d1.id == d2.id && d1.name == d2.name && d1.transportType == d2.transportType &&
+          d1.isInput == d2.isInput && d1.isOutput == d2.isOutput, "Same properties → all fields equal")
 }
 
 do {
     let d1 = AudioDevice(id: "uid-1", name: "Device", transportType: "USB", isInput: false, isOutput: true)
     let d2 = AudioDevice(id: "uid-2", name: "Device", transportType: "USB", isInput: false, isOutput: true)
-    check(d1 != d2, "Different IDs → not equal")
+    check(d1.id != d2.id, "Different IDs → not identical")
+}
+
+do {
+    // AudioDevice Codable round-trip
+    let data = try! JSONEncoder().encode(speakers)
+    let decoded = try! JSONDecoder().decode(AudioDevice.self, from: data)
+    check(decoded.id == speakers.id && decoded.name == speakers.name, "AudioDevice round-trips through Codable")
 }
 
 // ============================================================================
@@ -1525,7 +1420,7 @@ do {
     let old = now.addingTimeInterval(-60 * 24 * 3600)  // 60 days ago
 
     let history: [String: DeviceHistoryEntry] = [
-        "conference-speakers-uid": DeviceHistoryEntry(device: speakers, connectedAt: old, lastSeen: old, isCurrentlyActive: false),
+        "conference-speakers-uid": entry(speakers, connectedAt: old, lastSeen: old, active: false),
     ]
     let cutoff = now.addingTimeInterval(-30 * 24 * 3600)
     let profileRefs: Set<String> = ["conference-speakers-uid"]  // Referenced by a profile
@@ -1541,7 +1436,7 @@ do {
     let old = now.addingTimeInterval(-60 * 24 * 3600)
 
     let history: [String: DeviceHistoryEntry] = [
-        "orphan-device-uid": DeviceHistoryEntry(device: speakers, connectedAt: old, lastSeen: old, isCurrentlyActive: false),
+        "orphan-device-uid": entry(speakers, connectedAt: old, lastSeen: old, active: false),
     ]
     let cutoff = now.addingTimeInterval(-30 * 24 * 3600)
     let profileRefs: Set<String> = []  // Not referenced
@@ -1557,9 +1452,9 @@ do {
     let recent = now.addingTimeInterval(-1 * 24 * 3600)
 
     let history: [String: DeviceHistoryEntry] = [
-        "old-referenced": DeviceHistoryEntry(device: speakers, connectedAt: old, lastSeen: old, isCurrentlyActive: false),
-        "old-unreferenced": DeviceHistoryEntry(device: headphones, connectedAt: old, lastSeen: old, isCurrentlyActive: false),
-        "recent-unreferenced": DeviceHistoryEntry(device: bluetooth, connectedAt: recent, lastSeen: recent, isCurrentlyActive: false),
+        "old-referenced": entry(speakers, connectedAt: old, lastSeen: old, active: false),
+        "old-unreferenced": entry(headphones, connectedAt: old, lastSeen: old, active: false),
+        "recent-unreferenced": entry(bluetooth, connectedAt: recent, lastSeen: recent, active: false),
     ]
     let cutoff = now.addingTimeInterval(-30 * 24 * 3600)
     let profileRefs: Set<String> = ["old-referenced"]
@@ -1577,7 +1472,7 @@ do {
     let old = now.addingTimeInterval(-90 * 24 * 3600)  // 90 days old
 
     let history: [String: DeviceHistoryEntry] = [
-        "trigger-device": DeviceHistoryEntry(device: speakers, connectedAt: old, lastSeen: old, isCurrentlyActive: false),
+        "trigger-device": entry(speakers, connectedAt: old, lastSeen: old, active: false),
     ]
     let cutoff = now.addingTimeInterval(-30 * 24 * 3600)
     let profileRefs: Set<String> = ["trigger-device"]
@@ -1592,80 +1487,13 @@ do {
     let old = now.addingTimeInterval(-45 * 24 * 3600)
 
     let history: [String: DeviceHistoryEntry] = [
-        "shared-device": DeviceHistoryEntry(device: speakers, connectedAt: old, lastSeen: old, isCurrentlyActive: false),
+        "shared-device": entry(speakers, connectedAt: old, lastSeen: old, active: false),
     ]
     let cutoff = now.addingTimeInterval(-30 * 24 * 3600)
-    // Simulates being in 3 profiles' priority lists
     let profileRefs: Set<String> = ["shared-device", "other-device"]
 
     let pruned = pruneHistory(history, olderThan: cutoff, profileReferencedIDs: profileRefs)
     check(pruned["shared-device"] != nil, "Device referenced by multiple profiles → protected")
-}
-
-// ============================================================================
-// MARK: - ProfileValidationService — Cleanup Preserves Profile Refs
-// ============================================================================
-
-section("ProfileValidationService — Cleanup vs History Interaction")
-
-do {
-    // Simulate: device is in profile priority list but NOT in history
-    // cleanupInvalidDevices should remove it
-    let profile = Profile(
-        id: UUID(), name: "Test", iconName: "gear",
-        triggerDeviceIDs: ["known-uid", "unknown-uid"],
-        publicOutputPriority: ["known-uid", "unknown-uid", "also-unknown"],
-        publicInputPriority: [],
-        privateOutputPriority: ["unknown-uid"],
-        privateInputPriority: [],
-        preferredMode: .public
-    )
-
-    // Mock: only "known-uid" exists in history
-    let knownDevices: Set<String> = ["known-uid"]
-
-    func cleanProfile(_ p: Profile, knownIDs: Set<String>) -> Profile {
-        var cleaned = p
-        cleaned.triggerDeviceIDs = p.triggerDeviceIDs.filter { knownIDs.contains($0) }
-        cleaned.publicOutputPriority = p.publicOutputPriority.filter { knownIDs.contains($0) }
-        cleaned.publicInputPriority = p.publicInputPriority.filter { knownIDs.contains($0) }
-        cleaned.privateOutputPriority = p.privateOutputPriority.filter { knownIDs.contains($0) }
-        cleaned.privateInputPriority = p.privateInputPriority.filter { knownIDs.contains($0) }
-        return cleaned
-    }
-
-    let cleaned = cleanProfile(profile, knownIDs: knownDevices)
-    checkEqual(cleaned.triggerDeviceIDs, ["known-uid"], "Unknown device removed from triggers")
-    checkEqual(cleaned.publicOutputPriority, ["known-uid"], "Unknown devices removed from output priority")
-    checkEqual(cleaned.privateOutputPriority.count, 0, "All unknown → empty private output")
-}
-
-do {
-    // All devices known → no changes
-    let profile = Profile(
-        id: UUID(), name: "Clean", iconName: "gear",
-        triggerDeviceIDs: ["a", "b"],
-        publicOutputPriority: ["a", "b", "c"],
-        publicInputPriority: ["d"],
-        privateOutputPriority: ["b", "c"],
-        privateInputPriority: ["d"],
-        preferredMode: .public
-    )
-    let knownIDs: Set<String> = ["a", "b", "c", "d"]
-
-    func cleanProfile(_ p: Profile, knownIDs: Set<String>) -> Profile {
-        var cleaned = p
-        cleaned.triggerDeviceIDs = p.triggerDeviceIDs.filter { knownIDs.contains($0) }
-        cleaned.publicOutputPriority = p.publicOutputPriority.filter { knownIDs.contains($0) }
-        cleaned.publicInputPriority = p.publicInputPriority.filter { knownIDs.contains($0) }
-        cleaned.privateOutputPriority = p.privateOutputPriority.filter { knownIDs.contains($0) }
-        cleaned.privateInputPriority = p.privateInputPriority.filter { knownIDs.contains($0) }
-        return cleaned
-    }
-
-    let cleaned = cleanProfile(profile, knownIDs: knownIDs)
-    checkEqual(cleaned.triggerDeviceIDs, profile.triggerDeviceIDs, "All known → triggers unchanged")
-    checkEqual(cleaned.publicOutputPriority, profile.publicOutputPriority, "All known → output unchanged")
 }
 
 // ============================================================================
@@ -1677,7 +1505,6 @@ section("NightModeConfig — Additional Edge Cases")
 do {
     // start == end → always-on (24h night mode)
     let cfg = NightModeConfig(isEnabled: true, startHour: 22, startMinute: 0, endHour: 22, endMinute: 0, overlay: .flat)
-    // Create a date at 22:00
     var cal = Calendar.current
     cal.timeZone = .current
     var comps = cal.dateComponents([.year, .month, .day], from: Date())
@@ -1689,7 +1516,7 @@ do {
 do {
     // Midnight crossing: 23:00-07:00, current = 02:00
     let cfg = NightModeConfig(isEnabled: true, startHour: 23, startMinute: 0, endHour: 7, endMinute: 0, overlay: .flat)
-    var cal = Calendar.current
+    let cal = Calendar.current
     var comps = cal.dateComponents([.year, .month, .day], from: Date())
     comps.hour = 2; comps.minute = 0
     let testDate = cal.date(from: comps)!
@@ -1699,7 +1526,7 @@ do {
 do {
     // Midnight crossing: 23:00-07:00, current = 08:00
     let cfg = NightModeConfig(isEnabled: true, startHour: 23, startMinute: 0, endHour: 7, endMinute: 0, overlay: .flat)
-    var cal = Calendar.current
+    let cal = Calendar.current
     var comps = cal.dateComponents([.year, .month, .day], from: Date())
     comps.hour = 8; comps.minute = 0
     let testDate = cal.date(from: comps)!
@@ -1709,7 +1536,7 @@ do {
 do {
     // Same-day range: 09:00-17:00, current = 12:00
     let cfg = NightModeConfig(isEnabled: true, startHour: 9, startMinute: 0, endHour: 17, endMinute: 0, overlay: .flat)
-    var cal = Calendar.current
+    let cal = Calendar.current
     var comps = cal.dateComponents([.year, .month, .day], from: Date())
     comps.hour = 12; comps.minute = 0
     let testDate = cal.date(from: comps)!
@@ -1719,7 +1546,7 @@ do {
 do {
     // Exact start time → active
     let cfg = NightModeConfig(isEnabled: true, startHour: 22, startMinute: 0, endHour: 7, endMinute: 0, overlay: .flat)
-    var cal = Calendar.current
+    let cal = Calendar.current
     var comps = cal.dateComponents([.year, .month, .day], from: Date())
     comps.hour = 22; comps.minute = 0
     let testDate = cal.date(from: comps)!
@@ -1729,7 +1556,7 @@ do {
 do {
     // Exact end time → NOT active (end is exclusive)
     let cfg = NightModeConfig(isEnabled: true, startHour: 22, startMinute: 0, endHour: 7, endMinute: 0, overlay: .flat)
-    var cal = Calendar.current
+    let cal = Calendar.current
     var comps = cal.dateComponents([.year, .month, .day], from: Date())
     comps.hour = 7; comps.minute = 0
     let testDate = cal.date(from: comps)!
@@ -1790,14 +1617,13 @@ do {
 section("Profile — Priority List Accessor Completeness")
 
 do {
-    let p = Profile(
-        id: UUID(), name: "Test", iconName: "gear",
+    let p = makeProfile(
+        name: "Test",
         triggerDeviceIDs: ["t1"],
         publicOutputPriority: ["pub-out"],
         publicInputPriority: ["pub-in"],
         privateOutputPriority: ["priv-out"],
-        privateInputPriority: ["priv-in"],
-        preferredMode: .public
+        privateInputPriority: ["priv-in"]
     )
 
     checkEqual(p.priorityList(isOutput: true, mode: ProfileMode.public), ["pub-out"], "public+output")
@@ -1808,15 +1634,7 @@ do {
 
 do {
     // Empty lists → empty arrays
-    let p = Profile(
-        id: UUID(), name: "Empty", iconName: "gear",
-        triggerDeviceIDs: [],
-        publicOutputPriority: [],
-        publicInputPriority: [],
-        privateOutputPriority: [],
-        privateInputPriority: [],
-        preferredMode: .public
-    )
+    let p = makeProfile(name: "Empty")
     check(p.priorityList(isOutput: true, mode: ProfileMode.public).isEmpty, "Empty public output → []")
     check(p.priorityList(isOutput: false, mode: ProfileMode.private).isEmpty, "Empty private input → []")
 }
@@ -2036,816 +1854,197 @@ do {
 }
 
 // ============================================================================
-// MARK: - Helper: Driver Volume Curve (mirrors DriverState.swift:116-140)
+// MARK: - AudioCore.shouldApplyTrigger — Manual-Override Protection
 // ============================================================================
+// Real shared logic — exercised directly. Allowed only if a trigger device is currently
+// active AND its connectedAt is strictly after the manual switch.
 
-/// Mirrors DriverState.ioGain — the gain applied in the IO path.
-/// BUG 7 FIX: was cubic (scalar³), now squared (scalar²) to match comment and macOS behavior.
-func computeIOGain(volumeScalar: Float32, isMuted: Bool) -> Float32 {
-    if isMuted || volumeScalar <= 0 { return 0.0 }
-    return volumeScalar * volumeScalar  // squared — matches macOS hardware volume curve
-}
+section("AudioCore.shouldApplyTrigger — Manual Override Protection")
 
-/// Mirrors DriverState.volumeDB getter — quadratic scalar-to-dB conversion.
-func volumeScalarToDB(_ scalar: Float32, minDB: Float32 = -96.0, maxDB: Float32 = 0.0) -> Float32 {
-    if scalar <= 0 { return minDB }
-    return minDB + (scalar * scalar) * (maxDB - minDB)
-}
-
-/// Mirrors DriverState.volumeDB setter — inverse quadratic dB-to-scalar conversion.
-func volumeDBToScalar(_ dB: Float32, minDB: Float32 = -96.0, maxDB: Float32 = 0.0) -> Float32 {
-    let clamped = min(max(dB, minDB), maxDB)
-    if clamped <= minDB { return 0 }
-    let normalized = (clamped - minDB) / (maxDB - minDB)
-    return sqrtf(normalized)
-}
-
-// ============================================================================
-// MARK: - Helper: EQ State Machine (mirrors EQEngineService state transitions)
-// ============================================================================
-
-enum PipelineState: String, Equatable {
-    case idle, preparingDevice, preparingSampleRate, starting, running, stopping
-}
-
-enum PipelineEvent: Equatable {
-    case startRequested(generation: Int)
-    case deviceAppeared(generation: Int)
-    case sampleRateReady(generation: Int)
-    case auSetupComplete
-    case stopRequested
-    case cancelRequested
-    case switchRequested(generation: Int)
-    case safetyTimerFired(generation: Int)
-}
-
-struct StateMachineResult: Equatable {
-    let newState: PipelineState
-    let shouldProceed: Bool  // true = state changed, false = event ignored
-}
-
-/// Pure function modeling EQEngineService state transitions.
-/// Each transition checks: (1) current state guard (2) generation match.
-func stateMachineTransition(
-    currentState: PipelineState,
-    event: PipelineEvent,
-    currentGeneration: Int
-) -> StateMachineResult {
-    switch event {
-    case .startRequested(let gen):
-        // Start always goes to preparingDevice (increments generation internally)
-        return StateMachineResult(newState: .preparingDevice, shouldProceed: true)
-
-    case .deviceAppeared(let gen):
-        guard currentState == .preparingDevice else {
-            return StateMachineResult(newState: currentState, shouldProceed: false)
-        }
-        guard gen == currentGeneration else {
-            return StateMachineResult(newState: currentState, shouldProceed: false)
-        }
-        return StateMachineResult(newState: .preparingSampleRate, shouldProceed: true)
-
-    case .sampleRateReady(let gen):
-        guard currentState == .preparingSampleRate else {
-            return StateMachineResult(newState: currentState, shouldProceed: false)
-        }
-        guard gen == currentGeneration else {
-            return StateMachineResult(newState: currentState, shouldProceed: false)
-        }
-        return StateMachineResult(newState: .starting, shouldProceed: true)
-
-    case .auSetupComplete:
-        guard currentState == .starting else {
-            return StateMachineResult(newState: currentState, shouldProceed: false)
-        }
-        return StateMachineResult(newState: .running, shouldProceed: true)
-
-    case .stopRequested:
-        guard currentState == .running else {
-            return StateMachineResult(newState: currentState, shouldProceed: false)
-        }
-        return StateMachineResult(newState: .stopping, shouldProceed: true)
-
-    case .cancelRequested:
-        return StateMachineResult(newState: .idle, shouldProceed: true)
-
-    case .switchRequested(let gen):
-        if currentState == .running {
-            return StateMachineResult(newState: .preparingSampleRate, shouldProceed: true)
-        } else if currentState == .preparingSampleRate {
-            // Rapid switch while waiting for rate — reset with new gen
-            guard gen == currentGeneration else {
-                return StateMachineResult(newState: currentState, shouldProceed: false)
-            }
-            return StateMachineResult(newState: .preparingSampleRate, shouldProceed: true)
-        } else {
-            // Not running — fall back to full start
-            return StateMachineResult(newState: .preparingDevice, shouldProceed: true)
-        }
-
-    case .safetyTimerFired(let gen):
-        guard gen == currentGeneration else {
-            return StateMachineResult(newState: currentState, shouldProceed: false)
-        }
-        if currentState == .preparingDevice {
-            return StateMachineResult(newState: .preparingSampleRate, shouldProceed: true)
-        } else if currentState == .preparingSampleRate {
-            return StateMachineResult(newState: .starting, shouldProceed: true)
-        }
-        return StateMachineResult(newState: currentState, shouldProceed: false)
-    }
-}
-
-// ============================================================================
-// MARK: - Helper: Manual Override Timestamp (mirrors ProfileManager.shouldApplyTrigger)
-// ============================================================================
-
-struct TriggerDeviceEntry {
-    let deviceID: String
-    let isCurrentlyActive: Bool
-    let connectedAt: Date
-}
-
-/// Pure function mirroring ProfileManager.shouldApplyTrigger().
-/// Compares `connectedAt` (not `lastSeen`) so an unrelated device event that merely
-/// refreshes lastSeen cannot resurrect an old trigger and override a manual selection.
-func shouldApplyTriggerPure(
-    lastManualSwitch: Date?,
-    triggerEntries: [TriggerDeviceEntry]
-) -> Bool {
-    guard let lastManualSwitch = lastManualSwitch else {
-        return true  // No manual switch → always allow
-    }
-    for entry in triggerEntries {
-        if entry.isCurrentlyActive && entry.connectedAt > lastManualSwitch {
-            return true  // Device connected after manual switch → allow
-        }
-    }
-    return false  // All trigger devices predate manual switch → block
-}
-
-// ============================================================================
-// MARK: - Helper: updateSettings guard (mirrors EQEngineService.updateSettings)
-// ============================================================================
-
-func updateSettingsPure(eqAUExists: Bool, isRunning: Bool, settings: EQSettings) -> (applied: Bool, bypassed: Bool) {
-    guard eqAUExists else { return (applied: false, bypassed: false) }
-    return (applied: true, bypassed: settings.isFlat)
-}
-
-// ============================================================================
-// MARK: - Helper: EQ Bypass Gain Jump
-// ============================================================================
-
-/// Computes the maximum gain discontinuity when toggling EQ bypass.
-func eqBypassGainJump(bands: [EQBand], preamp: Float32) -> Float32 {
-    let maxBandGain = bands.map { abs($0.gain) }.max() ?? 0
-    return maxBandGain + abs(preamp)
-}
-
-// ============================================================================
-// MARK: - Helper: Sample Rate Fallback
-// ============================================================================
-
-func resolveSampleRate(queryResult: Float64?, fallback: Float64 = 48000) -> Float64 {
-    return queryResult ?? fallback
-}
-
-// ============================================================================
-// MARK: - Helper: Channel Count
-// ============================================================================
-
-func resolveChannelCount(deviceChannels: UInt32?) -> UInt32 {
-    return 2  // Hardcoded — Bug 12
-}
-
-// ============================================================================
-// MARK: - Test: Driver Volume Curve — Cubic vs Quadratic (Bugs 7, 8)
-// ============================================================================
-
-section("Driver Volume Curve — Cubic vs Quadratic (Bugs 7, 8)")
-
-// Positive: ioGain at full volume
+// No manual switch → always allow
 do {
-    let gain = computeIOGain(volumeScalar: 1.0, isMuted: false)
-    checkApprox(gain, 1.0, tol: 0.001, "ioGain at scalar=1.0 → 1.0 (unity)")
-}
-
-// Positive: ioGain at zero volume
-do {
-    let gain = computeIOGain(volumeScalar: 0.0, isMuted: false)
-    checkApprox(gain, 0.0, tol: 0.001, "ioGain at scalar=0.0 → 0.0")
-}
-
-// Positive: ioGain when muted
-do {
-    let gain = computeIOGain(volumeScalar: 0.75, isMuted: true)
-    checkApprox(gain, 0.0, tol: 0.001, "ioGain when muted → 0.0 regardless of scalar")
-}
-
-// Regression (Bug 7): ioGain at 0.5 is 0.25 (squared), NOT 0.125 (cubic)
-do {
-    let gain = computeIOGain(volumeScalar: 0.5, isMuted: false)
-    checkApprox(gain, 0.25, tol: 0.001, "ioGain at scalar=0.5 → 0.25 (squared, not 0.125 cubic)")
-    check(abs(gain - 0.125) > 0.01, "ioGain at 0.5 is NOT 0.125 (that would be cubic)")
-}
-
-// Regression (Bug 7): ioGain at 0.8 is 0.64 (squared), NOT 0.512 (cubic)
-do {
-    let gain = computeIOGain(volumeScalar: 0.8, isMuted: false)
-    checkApprox(gain, 0.64, tol: 0.001, "ioGain at scalar=0.8 → 0.64 (squared)")
-    check(abs(gain - 0.512) > 0.01, "ioGain at 0.8 is NOT 0.512 (that would be cubic)")
-}
-
-// Positive: volumeDB at full volume
-do {
-    let dB = volumeScalarToDB(1.0)
-    checkApprox(dB, 0.0, tol: 0.01, "volumeDB at scalar=1.0 → 0.0 dB (max)")
-}
-
-// Positive: volumeDB at zero volume
-do {
-    let dB = volumeScalarToDB(0.0)
-    checkApprox(dB, -96.0, tol: 0.01, "volumeDB at scalar=0.0 → -96.0 dB (min)")
-}
-
-// Positive: volumeDB uses quadratic curve (scalar²)
-do {
-    let dB = volumeScalarToDB(0.5)
-    // Expected: -96 + (0.25) * 96 = -96 + 24 = -72
-    checkApprox(dB, -72.0, tol: 0.01, "volumeDB at scalar=0.5 → -72.0 dB (quadratic)")
-}
-
-// Positive: volumeDB round-trip consistency
-do {
-    let original: Float32 = 0.7
-    let dB = volumeScalarToDB(original)
-    let roundTrip = volumeDBToScalar(dB)
-    checkApprox(roundTrip, original, tol: 0.001, "volumeDB round-trip: 0.7 → dB → 0.7")
-}
-
-// Regression (Bug 7): ioGain curve and volumeDB curve are both quadratic after fix
-do {
-    let scalar: Float32 = 0.5
-    let ioGain = computeIOGain(volumeScalar: scalar, isMuted: false)
-    // ioGain = scalar² = 0.25
-    // volumeDB = -96 + scalar² * 96 = -72.0 dB → scalar = sqrt((-72+96)/96) = 0.5
-    // Both use scalar² — they are consistent
-    checkApprox(ioGain, scalar * scalar, tol: 0.001, "ioGain uses squared curve (consistent with volumeDB)")
-}
-
-// Regression (Bug 8): Volume sync — virtual scalar maps correctly to ioGain
-do {
-    // When EQ engine copies real device volume to virtual device,
-    // the driver applies ioGain = scalar². So if real device is at 0.5,
-    // virtual should also be 0.5 → ioGain = 0.25 → correct.
-    let realScalar: Float32 = 0.5
-    let virtualScalar = realScalar  // syncVolumeForEQ copies directly
-    let virtualGain = computeIOGain(volumeScalar: virtualScalar, isMuted: false)
-    checkApprox(virtualGain, 0.25, tol: 0.001, "Volume sync: virtual scalar 0.5 → ioGain 0.25")
-}
-
-// Negative: negative scalar
-do {
-    let gain = computeIOGain(volumeScalar: -0.5, isMuted: false)
-    checkApprox(gain, 0.0, tol: 0.001, "ioGain with negative scalar → 0.0")
-}
-
-// Negative: volumeDBToScalar below minDB
-do {
-    let scalar = volumeDBToScalar(-200.0)
-    checkApprox(scalar, 0.0, tol: 0.001, "volumeDBToScalar below minDB → 0.0")
-}
-
-// Negative: volumeDBToScalar above maxDB
-do {
-    let scalar = volumeDBToScalar(10.0)
-    checkApprox(scalar, 1.0, tol: 0.001, "volumeDBToScalar above maxDB → clamped to 1.0")
-}
-
-// Positive: ioGain at 0.1 (quiet volume)
-do {
-    let gain = computeIOGain(volumeScalar: 0.1, isMuted: false)
-    checkApprox(gain, 0.01, tol: 0.001, "ioGain at scalar=0.1 → 0.01 (squared)")
-}
-
-// ============================================================================
-// MARK: - Test: EQ State Machine Transitions (Bugs 1, 2)
-// ============================================================================
-
-section("EQ State Machine Transitions (Bugs 1, 2)")
-
-// Positive: Normal startup flow
-do {
-    var r = stateMachineTransition(currentState: .idle, event: .startRequested(generation: 1), currentGeneration: 1)
-    checkEqual(r.newState, .preparingDevice, "idle + startRequested → preparingDevice")
-    check(r.shouldProceed, "idle + startRequested → should proceed")
-
-    r = stateMachineTransition(currentState: .preparingDevice, event: .deviceAppeared(generation: 1), currentGeneration: 1)
-    checkEqual(r.newState, .preparingSampleRate, "preparingDevice + deviceAppeared → preparingSampleRate")
-
-    r = stateMachineTransition(currentState: .preparingSampleRate, event: .sampleRateReady(generation: 1), currentGeneration: 1)
-    checkEqual(r.newState, .starting, "preparingSampleRate + sampleRateReady → starting")
-
-    r = stateMachineTransition(currentState: .starting, event: .auSetupComplete, currentGeneration: 1)
-    checkEqual(r.newState, .running, "starting + auSetupComplete → running")
-}
-
-// Positive: Normal stop
-do {
-    let r = stateMachineTransition(currentState: .running, event: .stopRequested, currentGeneration: 1)
-    checkEqual(r.newState, .stopping, "running + stopRequested → stopping")
-}
-
-// Positive: Cancel from any state
-do {
-    for state in [PipelineState.idle, .preparingDevice, .preparingSampleRate, .starting, .running, .stopping] {
-        let r = stateMachineTransition(currentState: state, event: .cancelRequested, currentGeneration: 1)
-        checkEqual(r.newState, .idle, "cancel from \(state.rawValue) → idle")
-    }
-}
-
-// Regression (Bug 1): Stale callback with generation mismatch — ignored
-do {
-    let r = stateMachineTransition(currentState: .preparingDevice, event: .deviceAppeared(generation: 1), currentGeneration: 2)
-    checkEqual(r.newState, .preparingDevice, "stale deviceAppeared (gen 1 vs current 2) → ignored")
-    check(!r.shouldProceed, "stale callback should not proceed")
-}
-
-// Regression (Bug 1): Stale sampleRateReady — ignored
-do {
-    let r = stateMachineTransition(currentState: .preparingSampleRate, event: .sampleRateReady(generation: 1), currentGeneration: 2)
-    checkEqual(r.newState, .preparingSampleRate, "stale sampleRateReady → ignored")
-    check(!r.shouldProceed, "stale sampleRateReady should not proceed")
-}
-
-// Regression (Bug 2): Rapid switch while in preparingSampleRate — resets with new gen
-do {
-    let r = stateMachineTransition(currentState: .preparingSampleRate, event: .switchRequested(generation: 2), currentGeneration: 2)
-    checkEqual(r.newState, .preparingSampleRate, "preparingSampleRate + switch(matching gen) → stays in preparingSampleRate")
-    check(r.shouldProceed, "switch with matching gen should proceed (new request)")
-}
-
-// Regression (Bug 2): Safety timer fires with stale generation — no-op
-do {
-    let r = stateMachineTransition(currentState: .preparingSampleRate, event: .safetyTimerFired(generation: 1), currentGeneration: 2)
-    check(!r.shouldProceed, "stale safety timer should not proceed")
-}
-
-// Positive: Safety timer advances preparingDevice
-do {
-    let r = stateMachineTransition(currentState: .preparingDevice, event: .safetyTimerFired(generation: 1), currentGeneration: 1)
-    checkEqual(r.newState, .preparingSampleRate, "preparingDevice + safety timer → preparingSampleRate")
-}
-
-// Positive: Safety timer advances preparingSampleRate
-do {
-    let r = stateMachineTransition(currentState: .preparingSampleRate, event: .safetyTimerFired(generation: 1), currentGeneration: 1)
-    checkEqual(r.newState, .starting, "preparingSampleRate + safety timer → starting")
-}
-
-// Positive: switchRequested from running
-do {
-    let r = stateMachineTransition(currentState: .running, event: .switchRequested(generation: 2), currentGeneration: 2)
-    checkEqual(r.newState, .preparingSampleRate, "running + switchRequested → preparingSampleRate")
-}
-
-// Positive: switchRequested from idle — falls back to full start
-do {
-    let r = stateMachineTransition(currentState: .idle, event: .switchRequested(generation: 1), currentGeneration: 1)
-    checkEqual(r.newState, .preparingDevice, "idle + switchRequested → preparingDevice (full start)")
-}
-
-// Negative: stopRequested when not running — ignored
-do {
-    let r = stateMachineTransition(currentState: .idle, event: .stopRequested, currentGeneration: 1)
-    checkEqual(r.newState, .idle, "idle + stopRequested → stays idle")
-    check(!r.shouldProceed, "stop from idle should not proceed")
-}
-
-// Negative: deviceAppeared when not in preparingDevice — ignored
-do {
-    let r = stateMachineTransition(currentState: .running, event: .deviceAppeared(generation: 1), currentGeneration: 1)
-    checkEqual(r.newState, .running, "running + deviceAppeared → ignored")
-    check(!r.shouldProceed, "deviceAppeared in wrong state should not proceed")
-}
-
-// Regression (Bug 1): Rapid start(gen=1), start(gen=2), callback(gen=1) → ignored
-do {
-    // Simulate: first start with gen 1
-    var r = stateMachineTransition(currentState: .idle, event: .startRequested(generation: 1), currentGeneration: 1)
-    checkEqual(r.newState, .preparingDevice, "first start → preparingDevice")
-
-    // Second start bumps generation to 2
-    r = stateMachineTransition(currentState: .preparingDevice, event: .startRequested(generation: 2), currentGeneration: 2)
-    checkEqual(r.newState, .preparingDevice, "second start → preparingDevice (new gen)")
-
-    // Old callback from gen=1 arrives — should be ignored
-    r = stateMachineTransition(currentState: .preparingDevice, event: .deviceAppeared(generation: 1), currentGeneration: 2)
-    check(!r.shouldProceed, "callback from gen=1 ignored when current gen=2")
-}
-
-// ============================================================================
-// MARK: - Test: Manual Override Timestamp Logic (Bug 3)
-// ============================================================================
-
-section("Manual Override Timestamp Logic (Bug 3)")
-
-// Positive: No manual switch → always allow
-do {
-    let entries = [TriggerDeviceEntry(deviceID: "speakers-uid", isCurrentlyActive: true, connectedAt: Date())]
-    let result = shouldApplyTriggerPure(lastManualSwitch: nil, triggerEntries: entries)
+    let history = ["speakers-uid": entry(speakers, connectedAt: Date(), lastSeen: Date(), active: true)]
+    let result = AudioCore.shouldApplyTrigger(lastManualSwitch: nil, triggerDeviceIDs: ["speakers-uid"], history: history)
     check(result, "No manual switch timestamp → allow trigger")
 }
 
-// Positive: Device connected after manual switch → allow
+// Device connected after manual switch → allow
 do {
-    let manualSwitch = Date().addingTimeInterval(-60)  // 1 minute ago
-    let entries = [TriggerDeviceEntry(deviceID: "speakers-uid", isCurrentlyActive: true, connectedAt: Date())]
-    let result = shouldApplyTriggerPure(lastManualSwitch: manualSwitch, triggerEntries: entries)
+    let manualSwitch = Date().addingTimeInterval(-60)
+    let history = ["speakers-uid": entry(speakers, connectedAt: Date(), lastSeen: Date(), active: true)]
+    let result = AudioCore.shouldApplyTrigger(lastManualSwitch: manualSwitch, triggerDeviceIDs: ["speakers-uid"], history: history)
     check(result, "Device connected after manual switch → allow")
 }
 
-// Positive: Device connected before manual switch → block
+// Device connected before manual switch → block
 do {
-    let entries = [TriggerDeviceEntry(deviceID: "speakers-uid", isCurrentlyActive: true, connectedAt: Date().addingTimeInterval(-120))]
     let manualSwitch = Date().addingTimeInterval(-60)
-    let result = shouldApplyTriggerPure(lastManualSwitch: manualSwitch, triggerEntries: entries)
+    let history = ["speakers-uid": entry(speakers, connectedAt: Date().addingTimeInterval(-120), lastSeen: Date(), active: true)]
+    let result = AudioCore.shouldApplyTrigger(lastManualSwitch: manualSwitch, triggerDeviceIDs: ["speakers-uid"], history: history)
     check(!result, "Device connected before manual switch → block")
 }
 
-// Positive: Multiple devices, one connected after → allow (any-match)
+// Multiple devices, one connected after → allow (any-match)
 do {
     let manualSwitch = Date().addingTimeInterval(-60)
-    let entries = [
-        TriggerDeviceEntry(deviceID: "speakers-uid", isCurrentlyActive: true, connectedAt: Date().addingTimeInterval(-120)),
-        TriggerDeviceEntry(deviceID: "headphones-uid", isCurrentlyActive: true, connectedAt: Date())
+    let history: [String: DeviceHistoryEntry] = [
+        "speakers-uid": entry(speakers, connectedAt: Date().addingTimeInterval(-120), lastSeen: Date(), active: true),
+        "beyerdynamic-uid": entry(headphones, connectedAt: Date(), lastSeen: Date(), active: true),
     ]
-    let result = shouldApplyTriggerPure(lastManualSwitch: manualSwitch, triggerEntries: entries)
+    let result = AudioCore.shouldApplyTrigger(lastManualSwitch: manualSwitch, triggerDeviceIDs: ["speakers-uid", "beyerdynamic-uid"], history: history)
     check(result, "One device connected after manual switch → allow (any-match)")
 }
 
-// Positive: All devices connected before → block
+// All devices connected before → block
 do {
     let manualSwitch = Date().addingTimeInterval(-60)
-    let entries = [
-        TriggerDeviceEntry(deviceID: "speakers-uid", isCurrentlyActive: true, connectedAt: Date().addingTimeInterval(-120)),
-        TriggerDeviceEntry(deviceID: "headphones-uid", isCurrentlyActive: true, connectedAt: Date().addingTimeInterval(-120))
+    let history: [String: DeviceHistoryEntry] = [
+        "speakers-uid": entry(speakers, connectedAt: Date().addingTimeInterval(-120), lastSeen: Date(), active: true),
+        "beyerdynamic-uid": entry(headphones, connectedAt: Date().addingTimeInterval(-120), lastSeen: Date(), active: true),
     ]
-    let result = shouldApplyTriggerPure(lastManualSwitch: manualSwitch, triggerEntries: entries)
+    let result = AudioCore.shouldApplyTrigger(lastManualSwitch: manualSwitch, triggerDeviceIDs: ["speakers-uid", "beyerdynamic-uid"], history: history)
     check(!result, "All devices connected before manual switch → block")
 }
 
-// Regression (Bug 3): nil timestamp after force-quit → allows all
+// nil timestamp after force-quit → allows all
 do {
-    let entries = [TriggerDeviceEntry(deviceID: "speakers-uid", isCurrentlyActive: true, connectedAt: Date().addingTimeInterval(-3600))]
-    let result = shouldApplyTriggerPure(lastManualSwitch: nil, triggerEntries: entries)
+    let history = ["speakers-uid": entry(speakers, connectedAt: Date().addingTimeInterval(-3600), lastSeen: Date(), active: true)]
+    let result = AudioCore.shouldApplyTrigger(lastManualSwitch: nil, triggerDeviceIDs: ["speakers-uid"], history: history)
     check(result, "Force-quit (nil timestamp) → allows all triggers")
 }
 
-// Negative: Device in history but not currently active → block
+// Device in history but not currently active → block
 do {
     let manualSwitch = Date().addingTimeInterval(-60)
-    let entries = [TriggerDeviceEntry(deviceID: "speakers-uid", isCurrentlyActive: false, connectedAt: Date())]
-    let result = shouldApplyTriggerPure(lastManualSwitch: manualSwitch, triggerEntries: entries)
+    let history = ["speakers-uid": entry(speakers, connectedAt: Date(), lastSeen: Date(), active: false)]
+    let result = AudioCore.shouldApplyTrigger(lastManualSwitch: manualSwitch, triggerDeviceIDs: ["speakers-uid"], history: history)
     check(!result, "Device not currently active → block even if connectedAt is after manual switch")
 }
 
-// Negative: Empty trigger entries → block
+// Empty trigger IDs → block (a manual switch is active and nothing qualifies)
 do {
     let manualSwitch = Date().addingTimeInterval(-60)
-    let result = shouldApplyTriggerPure(lastManualSwitch: manualSwitch, triggerEntries: [])
-    check(!result, "Empty trigger entries → block")
+    let result = AudioCore.shouldApplyTrigger(lastManualSwitch: manualSwitch, triggerDeviceIDs: [], history: [:])
+    check(!result, "Empty trigger IDs with active manual switch → block")
 }
 
 // ============================================================================
-// MARK: - Regression: Manual override survives unrelated device events (Bug #2)
+// MARK: - Manual override survives unrelated device events (via AudioCore)
 // ============================================================================
-
-section("Manual override survives unrelated device events (Bug #2)")
-
 // The core bug: history refreshed lastSeen for EVERY connected device on any event,
 // so plugging in an unrelated device made an old trigger look "connected after" the
-// manual switch. connectedAt (advanced only on reconnect) fixes this.
+// manual switch. connectedAt (advanced only on reconnect) fixes this. This exercises
+// AudioCore.updateDeviceHistory + AudioCore.shouldApplyTrigger together.
+
+section("Manual override survives unrelated device events")
+
 do {
     let t0 = Date().addingTimeInterval(-300)   // trigger device connected 5 min ago
     let t1 = Date().addingTimeInterval(-120)   // user manually switched 2 min ago
     let t2 = Date().addingTimeInterval(-30)    // unrelated device plugged in 30s ago
 
     // Trigger device connected before the manual switch and stays connected throughout.
-    var history = performHistoryUpdate([:], with: [speakers], now: t0)
+    var history = AudioCore.updateDeviceHistory([:], with: [speakers], now: t0)
     // An unrelated device is plugged in after the manual switch.
-    history = performHistoryUpdate(history, with: [speakers, headphones], now: t2)
+    history = AudioCore.updateDeviceHistory(history, with: [speakers, headphones], now: t2)
 
     // The unrelated event refreshes the trigger device's lastSeen, but NOT connectedAt.
     checkEqual(history["speakers-uid"]!.lastSeen, t2, "Unrelated event refreshes lastSeen")
     checkEqual(history["speakers-uid"]!.connectedAt, t0, "connectedAt unchanged by unrelated event")
 
-    let entry = history["speakers-uid"]!
-    let triggerEntries = [TriggerDeviceEntry(
-        deviceID: "speakers-uid",
-        isCurrentlyActive: entry.isCurrentlyActive,
-        connectedAt: entry.connectedAt
-    )]
-    let result = shouldApplyTriggerPure(lastManualSwitch: t1, triggerEntries: triggerEntries)
-    check(!result, "Trigger predating manual switch stays blocked despite unrelated plug-in (Bug #2)")
+    let result = AudioCore.shouldApplyTrigger(lastManualSwitch: t1, triggerDeviceIDs: ["speakers-uid"], history: history)
+    check(!result, "Trigger predating manual switch stays blocked despite unrelated plug-in")
 }
 
-// Counter-case: the trigger device itself reconnects after the manual switch → allow.
 do {
+    // Counter-case: the trigger device itself reconnects after the manual switch → allow.
     let t0 = Date().addingTimeInterval(-300)
     let t1 = Date().addingTimeInterval(-120)
     let t2 = Date().addingTimeInterval(-30)
 
-    var history = performHistoryUpdate([:], with: [speakers], now: t0)   // first connect
-    history = performHistoryUpdate(history, with: [], now: t1)           // disconnect
-    history = performHistoryUpdate(history, with: [speakers], now: t2)   // reconnect after manual switch
+    var history = AudioCore.updateDeviceHistory([:], with: [speakers], now: t0)   // first connect
+    history = AudioCore.updateDeviceHistory(history, with: [], now: t1)           // disconnect
+    history = AudioCore.updateDeviceHistory(history, with: [speakers], now: t2)   // reconnect after manual switch
 
     checkEqual(history["speakers-uid"]!.connectedAt, t2, "Reconnect advances connectedAt")
 
-    let entry = history["speakers-uid"]!
-    let triggerEntries = [TriggerDeviceEntry(
-        deviceID: "speakers-uid",
-        isCurrentlyActive: entry.isCurrentlyActive,
-        connectedAt: entry.connectedAt
-    )]
-    let result = shouldApplyTriggerPure(lastManualSwitch: t1, triggerEntries: triggerEntries)
+    let result = AudioCore.shouldApplyTrigger(lastManualSwitch: t1, triggerDeviceIDs: ["speakers-uid"], history: history)
     check(result, "Trigger reconnected after manual switch → allow (deliberate re-plug)")
 }
 
 // ============================================================================
-// MARK: - Regression: No-match fallback respects manual override (Bug #6)
+// MARK: - AudioCore.findBestTriggerMatch — Trigger Matching & Tie-Break
 // ============================================================================
+// Real shared logic — exercised directly.
 
-section("No-match fallback respects manual override (Bug #6)")
+section("AudioCore.findBestTriggerMatch — Matching & Tie-Break")
 
-// Mirrors ProfileTriggerService.evaluateTriggers: an automatic device event that
-// matches no trigger must not fall back to System Default while a manual override
-// is active. Manual re-evaluation still falls back (matches the match-path convention).
-func shouldFallBackToSystemDefault(isManualTrigger: Bool, hasMatch: Bool, hasActiveManualOverride: Bool) -> Bool {
-    if hasMatch { return false }
-    if !isManualTrigger && hasActiveManualOverride { return false }
-    return true
+do {
+    // No profiles with rules → no match
+    let match = AudioCore.findBestTriggerMatch(profiles: [makeProfile()], currentDeviceIDs: ["speakers-uid"])
+    check(match == nil, "Profile with no trigger rules → no match")
 }
 
 do {
-    let r = shouldFallBackToSystemDefault(isManualTrigger: false, hasMatch: false, hasActiveManualOverride: true)
-    check(!r, "Automatic no-match with active manual override → keep manual profile (Bug #6)")
-}
-do {
-    let r = shouldFallBackToSystemDefault(isManualTrigger: false, hasMatch: false, hasActiveManualOverride: false)
-    check(r, "Automatic no-match without override → fall back to System Default")
-}
-do {
-    let r = shouldFallBackToSystemDefault(isManualTrigger: true, hasMatch: false, hasActiveManualOverride: true)
-    check(r, "Manual re-evaluation with no match still falls back (explicit request)")
-}
-do {
-    let r = shouldFallBackToSystemDefault(isManualTrigger: false, hasMatch: true, hasActiveManualOverride: true)
-    check(!r, "A match is handled by the apply path, not the fallback")
+    // Single specific-device match
+    let p = makeProfile(name: "P1", triggerRules: [.specificDevice(id: "speakers-uid")])
+    let match = AudioCore.findBestTriggerMatch(profiles: [p], currentDeviceIDs: ["speakers-uid"])
+    check(match != nil, "Connected trigger device → match")
+    checkEqual(match?.profileID, p.id, "Matched profile id")
+    checkEqual(match?.matchCount, 1, "Match count = 1")
+    checkEqual(match?.specificCount, 1, "Specific count = 1")
+    checkEqual(match?.primaryTriggerDevice, "speakers-uid", "Primary trigger device")
 }
 
-// ============================================================================
-// MARK: - Test: updateSettings on Dead AU (Bug 4)
-// ============================================================================
-
-section("updateSettings on Dead AU (Bug 4)")
-
-// Positive: Valid AU + non-flat → applied, not bypassed
 do {
-    var eq = EQSettings.flat
-    eq.bands[3].gain = 5.0
-    let result = updateSettingsPure(eqAUExists: true, isRunning: true, settings: eq)
-    check(result.applied, "Valid AU + non-flat → applied")
-    check(!result.bypassed, "Non-flat EQ → not bypassed")
+    // Higher match count wins
+    let p1 = makeProfile(name: "P1", triggerRules: [.specificDevice(id: "speakers-uid")])
+    let p2 = makeProfile(name: "P2", triggerRules: [.specificDevice(id: "speakers-uid"), .specificDevice(id: "beyerdynamic-uid")])
+    let match = AudioCore.findBestTriggerMatch(profiles: [p1, p2], currentDeviceIDs: ["speakers-uid", "beyerdynamic-uid"])
+    checkEqual(match?.profileID, p2.id, "Profile with more matches wins")
+    checkEqual(match?.matchCount, 2, "Match count = 2")
 }
 
-// Positive: Valid AU + flat → applied and bypassed
 do {
-    let result = updateSettingsPure(eqAUExists: true, isRunning: true, settings: .flat)
-    check(result.applied, "Valid AU + flat → applied")
-    check(result.bypassed, "Flat EQ → bypassed")
+    // Tie-break: equal match counts → more specific (specificDevice) matches win
+    let specific = makeProfile(name: "Specific", triggerRules: [.specificDevice(id: "airpods-uid")])
+    let classRule = makeProfile(name: "Class", triggerRules: [.transportType(type: "Bluetooth")])
+    // AirPods are Bluetooth → both profiles match with count 1; specific should win.
+    let match = AudioCore.findBestTriggerMatch(
+        profiles: [classRule, specific],
+        currentDeviceIDs: ["airpods-uid"],
+        currentDevices: [bluetooth]
+    )
+    checkEqual(match?.profileID, specific.id, "Tie on count → specificDevice rule wins over transportType")
+    checkEqual(match?.specificCount, 1, "Winner has specificCount 1")
 }
 
-// Regression (Bug 4): nil AU → not applied (silent failure)
 do {
-    var eq = EQSettings.flat
-    eq.bands[3].gain = 5.0
-    let result = updateSettingsPure(eqAUExists: false, isRunning: true, settings: eq)
-    check(!result.applied, "nil AU → not applied (silent failure)")
+    // transportType rule matches by device class
+    let p = makeProfile(name: "BT", triggerRules: [.transportType(type: "Bluetooth")])
+    let match = AudioCore.findBestTriggerMatch(
+        profiles: [p],
+        currentDeviceIDs: ["airpods-uid"],
+        currentDevices: [bluetooth]
+    )
+    check(match != nil, "transportType rule matches a connected device of that class")
+    checkEqual(match?.specificCount, 0, "transportType match contributes no specific count")
+    checkEqual(match?.primaryTriggerDevice, "airpods-uid", "Primary trigger device is the matched BT device")
 }
 
-// Negative: AU exists but not running → still applied (guard only checks AU existence)
 do {
-    let result = updateSettingsPure(eqAUExists: true, isRunning: false, settings: .flat)
-    check(result.applied, "AU exists even if not running → applied (matches production behavior)")
-}
-
-// ============================================================================
-// MARK: - Test: NightMode start==end Semantics (Bug 17)
-// ============================================================================
-
-section("NightMode start==end Semantics (Bug 17)")
-
-// Regression (Bug 17): start==end at 10:00 → never active
-do {
-    var config = NightModeConfig.default
-    config.isEnabled = true
-    config.startHour = 10; config.startMinute = 0
-    config.endHour = 10; config.endMinute = 0
-    // Test at 10:00 — start==end means always-on (24h)
-    let at10 = makeTime(hour: 10, minute: 0)
-    check(config.isInQuietHours(now: at10), "start==end at 10:00, checked at 10:00 → ACTIVE (always-on 24h)")
-    // Test at 15:00
-    let at15 = makeTime(hour: 15, minute: 0)
-    check(config.isInQuietHours(now: at15), "start==end at 10:00, checked at 15:00 → ACTIVE (always-on 24h)")
-    // Test at 03:00
-    let at3 = makeTime(hour: 3, minute: 0)
-    check(config.isInQuietHours(now: at3), "start==end at 10:00, checked at 03:00 → ACTIVE (always-on 24h)")
-}
-
-// Regression (Bug 17 fix): start==end at 00:00 → always active (24h)
-do {
-    var config = NightModeConfig.default
-    config.isEnabled = true
-    config.startHour = 0; config.startMinute = 0
-    config.endHour = 0; config.endMinute = 0
-    let atMidnight = makeTime(hour: 0, minute: 0)
-    check(config.isInQuietHours(now: atMidnight), "start==end at 00:00 → ACTIVE (always-on 24h)")
-}
-
-// Regression (Bug 17 fix): start==end at 23:59 → always active
-do {
-    var config = NightModeConfig.default
-    config.isEnabled = true
-    config.startHour = 23; config.startMinute = 59
-    config.endHour = 23; config.endMinute = 59
-    let at2359 = makeTime(hour: 23, minute: 59)
-    check(config.isInQuietHours(now: at2359), "start==end at 23:59 → ACTIVE (always-on 24h)")
-}
-
-// Positive: Minimal range 10:00-10:01 → active for 1 minute
-do {
-    var config = NightModeConfig.default
-    config.isEnabled = true
-    config.startHour = 10; config.startMinute = 0
-    config.endHour = 10; config.endMinute = 1
-    let at1000 = makeTime(hour: 10, minute: 0)
-    check(config.isInQuietHours(now: at1000), "10:00-10:01 at 10:00 → active")
-    let at1001 = makeTime(hour: 10, minute: 1)
-    check(!config.isInQuietHours(now: at1001), "10:00-10:01 at 10:01 → NOT active (end exclusive)")
-}
-
-// Positive: Near-full day 00:00-23:59
-do {
-    var config = NightModeConfig.default
-    config.isEnabled = true
-    config.startHour = 0; config.startMinute = 0
-    config.endHour = 23; config.endMinute = 59
-    check(config.isInQuietHours(now: makeTime(hour: 12, minute: 0)), "00:00-23:59 at noon → active")
-    check(config.isInQuietHours(now: makeTime(hour: 0, minute: 0)), "00:00-23:59 at midnight → active")
-    check(!config.isInQuietHours(now: makeTime(hour: 23, minute: 59)), "00:00-23:59 at 23:59 → NOT active (end exclusive)")
-}
-
-// Negative: Disabled → never active regardless of range
-do {
-    var config = NightModeConfig.default
-    config.isEnabled = false
-    config.startHour = 0; config.startMinute = 0
-    config.endHour = 23; config.endMinute = 59
-    check(!config.isInQuietHours(now: makeTime(hour: 12, minute: 0)), "disabled → not active even in range")
+    // transportType with no matching device present → no match
+    let p = makeProfile(name: "BT", triggerRules: [.transportType(type: "Bluetooth")])
+    let match = AudioCore.findBestTriggerMatch(
+        profiles: [p],
+        currentDeviceIDs: ["speakers-uid"],
+        currentDevices: [speakers]  // Built-In, not Bluetooth
+    )
+    check(match == nil, "No device of the required class → no match")
 }
 
 // ============================================================================
-// MARK: - Test: isSystemDefault String Comparison (Bug 15)
-// ============================================================================
-
-section("isSystemDefault String Comparison (Bug 15)")
-
-// Positive: Stored flag set to true
-do {
-    let p = Profile(id: UUID(), name: "System Default", iconName: "speaker.wave.2", triggerDeviceIDs: [],
-                    publicOutputPriority: [], publicInputPriority: [],
-                    privateOutputPriority: [], privateInputPriority: [],
-                    preferredMode: .public, isSystemDefault: true)
-    check(p.isSystemDefault, "isSystemDefault: true → isSystemDefault true")
-}
-
-// Negative: Flag defaults to false
-do {
-    let p = Profile(id: UUID(), name: "System Default", iconName: "speaker.wave.2", triggerDeviceIDs: [],
-                    publicOutputPriority: [], publicInputPriority: [],
-                    privateOutputPriority: [], privateInputPriority: [],
-                    preferredMode: .public)
-    check(!p.isSystemDefault, "isSystemDefault defaults to false even if name matches")
-}
-
-// Negative: Regular profile
-do {
-    let p = Profile(id: UUID(), name: "Home Studio", iconName: "speaker.wave.2", triggerDeviceIDs: [],
-                    publicOutputPriority: [], publicInputPriority: [],
-                    privateOutputPriority: [], privateInputPriority: [],
-                    preferredMode: .public)
-    check(!p.isSystemDefault, "Regular profile → NOT isSystemDefault")
-}
-
-// Negative: Flag false even with matching name
-do {
-    let p = Profile(id: UUID(), name: "system default", iconName: "speaker.wave.2", triggerDeviceIDs: [],
-                    publicOutputPriority: [], publicInputPriority: [],
-                    privateOutputPriority: [], privateInputPriority: [],
-                    preferredMode: .public, isSystemDefault: false)
-    check(!p.isSystemDefault, "isSystemDefault: false → NOT isSystemDefault regardless of name")
-}
-
-// ============================================================================
-// MARK: - Test: EQ Bypass Amplitude Discontinuity (Bug 9)
-// ============================================================================
-
-section("EQ Bypass Amplitude Discontinuity (Bug 9)")
-
-// Positive: Flat EQ → no discontinuity
-do {
-    let jump = eqBypassGainJump(bands: EQSettings.flat.bands, preamp: 0)
-    checkApprox(jump, 0.0, tol: 0.01, "Flat EQ → zero gain jump on bypass")
-}
-
-// Regression (Bug 9): Non-flat EQ with +6dB band → 6dB jump
-do {
-    var bands = EQSettings.flat.bands
-    bands[3].gain = 6.0
-    let jump = eqBypassGainJump(bands: bands, preamp: 0)
-    checkApprox(jump, 6.0, tol: 0.01, "+6dB band → 6dB discontinuity on bypass toggle")
-}
-
-// Regression (Bug 9): Preamp adds to discontinuity
-do {
-    var bands = EQSettings.flat.bands
-    bands[3].gain = 6.0
-    let jump = eqBypassGainJump(bands: bands, preamp: 3.0)
-    checkApprox(jump, 9.0, tol: 0.01, "+6dB band + 3dB preamp → 9dB jump")
-}
-
-// Positive: Threshold boundary (below isFlat threshold)
-do {
-    var bands = EQSettings.flat.bands
-    bands[0].gain = 0.005
-    let jump = eqBypassGainJump(bands: bands, preamp: 0)
-    check(jump < 0.01, "0.005dB band → negligible jump")
-}
-
-// Negative: All bands at -12dB → 12dB jump
-do {
-    var bands = EQSettings.flat.bands
-    for i in 0..<bands.count { bands[i].gain = -12.0 }
-    let jump = eqBypassGainJump(bands: bands, preamp: 0)
-    checkApprox(jump, 12.0, tol: 0.01, "All bands at -12dB → 12dB jump on bypass")
-}
-
-// ============================================================================
-// MARK: - Test: Sample Rate Default Fallback (Bug 11)
-// ============================================================================
-
-section("Sample Rate Default Fallback (Bug 11)")
-
-// Positive: Valid rate passes through
-do {
-    checkEqual(resolveSampleRate(queryResult: 44100), 44100.0, "Valid rate 44100 → 44100")
-    checkEqual(resolveSampleRate(queryResult: 96000), 96000.0, "Valid rate 96000 → 96000")
-    checkEqual(resolveSampleRate(queryResult: 48000), 48000.0, "Valid rate 48000 → 48000")
-}
-
-// Regression (Bug 11): nil → falls back to 48000 silently
-do {
-    checkEqual(resolveSampleRate(queryResult: nil), 48000.0, "nil query → 48000 default (silent fallback)")
-}
-
-// Negative: Zero rate passes through (no validation)
-do {
-    checkEqual(resolveSampleRate(queryResult: 0), 0.0, "Zero rate → passes through (no validation)")
-}
-
-// Positive: Custom fallback
-do {
-    checkEqual(resolveSampleRate(queryResult: nil, fallback: 44100), 44100.0, "nil with custom fallback → 44100")
-}
-
-// ============================================================================
-// MARK: - Test: Hardcoded Stereo Channel Count (Bug 12)
-// ============================================================================
-
-section("Hardcoded Stereo Channel Count (Bug 12)")
-
-// Regression (Bug 12): Always returns 2 regardless of device
-do {
-    checkEqual(resolveChannelCount(deviceChannels: 1), 2, "Mono device (1 ch) → hardcoded 2")
-    checkEqual(resolveChannelCount(deviceChannels: 2), 2, "Stereo device (2 ch) → hardcoded 2")
-    checkEqual(resolveChannelCount(deviceChannels: 8), 2, "Multi-channel device (8 ch) → hardcoded 2")
-    checkEqual(resolveChannelCount(deviceChannels: nil), 2, "Unknown device (nil ch) → hardcoded 2")
-}
-
-// ============================================================================
-// MARK: - Level Meter RMS (F7)
+// MARK: - Level Meter RMS
 // ============================================================================
 
 func computeRMS(_ samples: [Float]) -> Float {
@@ -2854,7 +2053,7 @@ func computeRMS(_ samples: [Float]) -> Float {
     return sqrtf(sumSquares / Float(samples.count))
 }
 
-section("Level Meter RMS (F7)")
+section("Level Meter RMS")
 
 // RMS of silence → 0
 do {
@@ -2887,6 +2086,36 @@ do {
 // Empty input → 0
 do {
     checkEqual(computeRMS([]), Float(0), "RMS of empty input is 0")
+}
+
+// ============================================================================
+// MARK: - AudioCore.computeRMSLevels — Windowed RMS with smoothing (shared)
+// ============================================================================
+
+section("AudioCore.computeRMSLevels — Windowed RMS")
+
+do {
+    // Fewer than 2 channels → returns previous levels unchanged (guard)
+    let (l, r) = AudioCore.computeRMSLevels(
+        sampleAt: { _ in 0 }, totalSamples: 0, channels: 1, frameCapacity: 1024,
+        writeIndex: 0, previousLeft: 0.3, previousRight: 0.4
+    )
+    checkApprox(l, 0.3, "Mono → left unchanged (previous)")
+    checkApprox(r, 0.4, "Mono → right unchanged (previous)")
+}
+
+do {
+    // Full-scale DC on both channels, starting from 0 with default 0.7 smoothing:
+    // output = 0*0.7 + min(1.0,1.0)*0.3 = 0.3
+    let capacity = 2048
+    let channels = 2
+    let samples = [Float32](repeating: 1.0, count: capacity * channels)
+    let (l, r) = AudioCore.computeRMSLevels(
+        sampleAt: { samples[$0] }, totalSamples: samples.count, channels: channels,
+        frameCapacity: capacity, writeIndex: UInt64(capacity), previousLeft: 0, previousRight: 0
+    )
+    checkApprox(l, 0.3, tol: 0.01, "DC full-scale, first call → 0.3 (smoothed from 0)")
+    checkApprox(r, 0.3, tol: 0.01, "DC full-scale, first call → 0.3 (smoothed from 0)")
 }
 
 // ============================================================================

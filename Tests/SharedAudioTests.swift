@@ -1,4 +1,4 @@
-#!/usr/bin/env swift
+// SHARED: AudioProfiles/Models/AudioDevice.swift AudioProfiles/Models/ProfileMode.swift AudioProfiles/Models/Hotkey.swift AudioProfiles/Models/Profile.swift AudioProfiles/Models/DeviceHistoryEntry.swift AudioProfiles/Core/AudioCore.swift
 //
 // SharedAudioTests.swift
 //
@@ -6,7 +6,15 @@
 // (SharedAudioBuffer) and the app (SharedAudioReader). Tests the cross-process
 // mmap-based ring buffer without needing Core Audio or the actual driver.
 //
-// Run: swift Tests/SharedAudioTests.swift
+// The ring-buffer read-decision MATH (available / resync / framesToRead /
+// framesDropped) is NOT reimplemented here — it comes from the production
+// AudioCore.computeReadPlan (compiled in via the `// SHARED:` directive above,
+// which build.sh reads). The RMS metering math likewise comes from
+// AudioCore.computeRMSLevels. The local TestWriter/TestReader only cover the
+// memcpy/deinterleave DATA path, which is not part of AudioCore.
+//
+// Run via build.sh (it resolves the SHARED directive), or manually:
+//   swiftc <shared files...> Tests/SharedAudioTests.swift -o bin && ./bin
 //
 // These tests validate:
 //   1. File creation, mmap, and header initialization
@@ -16,11 +24,11 @@
 //   5. Under-run behavior (reader ahead of writer → silence)
 //   6. Resync after gap
 //   7. Cleanup on teardown
+//   8. AudioCore.computeReadPlan resync/drop arithmetic (real production code)
+//   9. AudioCore.computeRMSLevels metering (real production code)
 
 import Foundation
 import Darwin
-import CoreAudio
-import AudioToolbox
 
 // ============================================================================
 // MARK: - Shared constants (mirrored from both sides)
@@ -116,6 +124,11 @@ final class TestWriter {
 // ============================================================================
 // MARK: - Reader (simulates app's SharedAudioReader)
 // ============================================================================
+//
+// The DATA path (memcpy/deinterleave/wrap) is exercised here directly because
+// it is not part of AudioCore. The read-DECISION arithmetic (available, resync,
+// framesToRead, framesDropped) is delegated to AudioCore.computeReadPlan so the
+// tests exercise the real production code, exactly as SharedAudioReader.read does.
 
 final class TestReader {
     let fd: Int32
@@ -163,24 +176,26 @@ final class TestReader {
         close(fd)
     }
 
-    /// Read and deinterleave into separate channel buffers (simulates ABL read)
+    /// Read and deinterleave into separate channel buffers (simulates ABL read).
+    /// The read plan (how much / resync) comes from production AudioCore; only the
+    /// deinterleave/wrap memcpy loop lives here (that is the DATA path under test).
     func read(into channelBuffers: [UnsafeMutablePointer<Float32>], frameCount: Int) -> Int {
         let writeIdx = header.pointee.writeIndex
         OSMemoryBarrier()
 
-        var available = writeIdx >= readIndex ? Int(writeIdx - readIndex) : 0
-
-        // Resync if fallen behind by more than ring capacity
-        if available > frameCapacity {
-            readIndex = writeIdx - UInt64(frameCapacity)
-            available = frameCapacity
-        }
-
-        let framesToRead = min(min(available, frameCount), frameCapacity)
+        let plan = AudioCore.computeReadPlan(
+            writeIndex: writeIdx,
+            readIndex: readIndex,
+            frameCapacity: frameCapacity,
+            requestedFrames: frameCount
+        )
+        let framesToRead = plan.framesToRead
 
         if framesToRead > 0 {
             let cap = frameCapacity * channels
-            let startOffset = Int(readIndex % UInt64(frameCapacity)) * channels
+            // Pre-advance cursor, mirroring SharedAudioReader.read.
+            let readStart = plan.newReadIndex - UInt64(framesToRead)
+            let startOffset = Int(readStart % UInt64(frameCapacity)) * channels
 
             for ch in 0..<channels {
                 let dst = channelBuffers[ch]
@@ -193,12 +208,13 @@ final class TestReader {
                     dst[f] = 0
                 }
             }
-            readIndex &+= UInt64(framesToRead)
         } else {
             for ch in 0..<channels {
                 memset(channelBuffers[ch], 0, frameCount * MemoryLayout<Float32>.size)
             }
         }
+        // Advance/resync exactly as the plan dictates.
+        readIndex = plan.newReadIndex
         return framesToRead
     }
 
@@ -450,6 +466,260 @@ func testCleanup() {
 }
 
 // ============================================================================
+// MARK: - AudioCore.computeReadPlan (real production ring-buffer arithmetic)
+// ============================================================================
+
+func testReadPlanNormal() {
+    print("Test: computeReadPlan — normal, data available...")
+    // 500 frames available, request 128 → read 128, no drop, no reset.
+    let plan = AudioCore.computeReadPlan(
+        writeIndex: 500, readIndex: 0, frameCapacity: 4096, requestedFrames: 128)
+    assert(plan.available == 500, "available should be 500, got \(plan.available)")
+    assert(plan.framesToRead == 128, "framesToRead should be 128, got \(plan.framesToRead)")
+    assert(plan.newReadIndex == 128, "newReadIndex should be 128, got \(plan.newReadIndex)")
+    assert(plan.framesDropped == 0, "framesDropped should be 0, got \(plan.framesDropped)")
+    assert(!plan.didReset, "didReset should be false")
+}
+
+func testReadPlanUnderrun() {
+    print("Test: computeReadPlan — underrun (no data)...")
+    // writeIndex == readIndex → nothing available.
+    let plan = AudioCore.computeReadPlan(
+        writeIndex: 1000, readIndex: 1000, frameCapacity: 4096, requestedFrames: 256)
+    assert(plan.available == 0, "available should be 0, got \(plan.available)")
+    assert(plan.framesToRead == 0, "framesToRead should be 0, got \(plan.framesToRead)")
+    assert(plan.newReadIndex == 1000, "newReadIndex unchanged on underrun, got \(plan.newReadIndex)")
+    assert(plan.framesDropped == 0, "framesDropped should be 0")
+    assert(!plan.didReset, "didReset should be false")
+}
+
+func testReadPlanDriverReset() {
+    print("Test: computeReadPlan — driver reset (writeIndex < readIndex)...")
+    // DRIFT FIX: the old local test asserted this case drops 4096 frames.
+    // Production/AudioCore snaps readIndex to writeIndex and reads NOTHING —
+    // it drops 0 (the stale data is abandoned, not "dropped"), didReset == true.
+    let plan = AudioCore.computeReadPlan(
+        writeIndex: 0, readIndex: 4096, frameCapacity: 4096, requestedFrames: 512)
+    assert(plan.didReset, "didReset should be true on driver reset")
+    assert(plan.framesDropped == 0, "DRIFT: framesDropped should be 0 on reset (was wrongly 4096), got \(plan.framesDropped)")
+    assert(plan.available == 0, "available should be 0 after reset snap, got \(plan.available)")
+    assert(plan.framesToRead == 0, "framesToRead should be 0 on reset, got \(plan.framesToRead)")
+    assert(plan.newReadIndex == 0, "newReadIndex should snap to writeIndex (0), got \(plan.newReadIndex)")
+}
+
+func testReadPlanFellBehind() {
+    print("Test: computeReadPlan — fell behind > capacity (the drop branch)...")
+    // available (5000) > capacity (4096): this is the branch that drops frames.
+    // Drops available - capacity = 904; reads up to capacity, clamped to request.
+    let plan = AudioCore.computeReadPlan(
+        writeIndex: 5000, readIndex: 0, frameCapacity: 4096, requestedFrames: 512)
+    assert(plan.available == 4096, "available clamps to capacity 4096, got \(plan.available)")
+    assert(plan.framesDropped == 904, "framesDropped should be 5000-4096=904, got \(plan.framesDropped)")
+    assert(!plan.didReset, "didReset should be false (this is lag, not reset)")
+    assert(plan.framesToRead == 512, "framesToRead clamps to request 512, got \(plan.framesToRead)")
+    // Read cursor was force-advanced to writeIndex - capacity = 904, then + 512.
+    assert(plan.newReadIndex == 904 + 512, "newReadIndex should be 1416, got \(plan.newReadIndex)")
+}
+
+func testReadPlanClampsToCapacity() {
+    print("Test: computeReadPlan — request larger than capacity clamps...")
+    // Plenty available, huge request → clamps to frameCapacity.
+    let plan = AudioCore.computeReadPlan(
+        writeIndex: 10000, readIndex: 0, frameCapacity: 4096, requestedFrames: 100000)
+    // available 10000 > capacity → drops 10000-4096, reads capacity.
+    assert(plan.framesDropped == 10000 - 4096, "framesDropped should be \(10000 - 4096), got \(plan.framesDropped)")
+    assert(plan.framesToRead == 4096, "framesToRead clamps to capacity 4096, got \(plan.framesToRead)")
+}
+
+// ============================================================================
+// MARK: - AudioCore.computeRMSLevels (real production metering)
+// ============================================================================
+
+func testRMSSilence() {
+    print("Test: computeRMSLevels — silence → 0...")
+    let (l, r) = AudioCore.computeRMSLevels(
+        sampleAt: { _ in 0 },
+        totalSamples: 4096 * 2, channels: 2, frameCapacity: 4096,
+        writeIndex: 0, windowFrames: 1024,
+        previousLeft: 0, previousRight: 0, smoothing: 0.7)
+    assertApprox(l, 0, "Silence left should be 0")
+    assertApprox(r, 0, "Silence right should be 0")
+}
+
+func testRMSFullScaleSine() {
+    print("Test: computeRMSLevels — full-scale sine → ~0.707...")
+    // Interleaved stereo sine at amplitude 1.0. RMS of a sine is 1/sqrt(2) ≈ 0.707.
+    // Start previous at the true RMS so the one-pole smoother stays at steady state
+    // (isolates the RMS computation from the smoothing transient).
+    let freq: Float = 8.0 // whole cycles across 1024-frame window → clean RMS
+    let sampleAt: (Int) -> Float32 = { idx in
+        let frame = idx / 2
+        return sinf(2 * Float.pi * freq * Float(frame) / 1024.0)
+    }
+    let steady: Float = 1.0 / sqrtf(2.0)
+    let (l, r) = AudioCore.computeRMSLevels(
+        sampleAt: sampleAt,
+        totalSamples: 4096 * 2, channels: 2, frameCapacity: 4096,
+        // writeIndex 1024 → window is frames [0, 1024) which we filled with the sine.
+        writeIndex: 1024, windowFrames: 1024,
+        previousLeft: steady, previousRight: steady, smoothing: 0.7)
+    assertApprox(l, 0.707, tol: 0.01, "Full-scale sine left RMS should be ~0.707")
+    assertApprox(r, 0.707, tol: 0.01, "Full-scale sine right RMS should be ~0.707")
+}
+
+func testRMSDC() {
+    print("Test: computeRMSLevels — DC 1.0 → 1.0...")
+    // Constant 1.0 → RMS is 1.0. Start previous at 1.0 for steady state.
+    let (l, r) = AudioCore.computeRMSLevels(
+        sampleAt: { _ in 1.0 },
+        totalSamples: 4096 * 2, channels: 2, frameCapacity: 4096,
+        writeIndex: 0, windowFrames: 1024,
+        previousLeft: 1.0, previousRight: 1.0, smoothing: 0.7)
+    assertApprox(l, 1.0, "DC 1.0 left RMS should be 1.0")
+    assertApprox(r, 1.0, "DC 1.0 right RMS should be 1.0")
+}
+
+func testRMSClampLoud() {
+    print("Test: computeRMSLevels — loud (>1.0) signal clamps to 1.0...")
+    // DC 4.0 → raw RMS 4.0, but production clamps min(rms, 1.0). Start prev at 1.0.
+    let (l, r) = AudioCore.computeRMSLevels(
+        sampleAt: { _ in 4.0 },
+        totalSamples: 4096 * 2, channels: 2, frameCapacity: 4096,
+        writeIndex: 0, windowFrames: 1024,
+        previousLeft: 1.0, previousRight: 1.0, smoothing: 0.7)
+    assertApprox(l, 1.0, "Loud signal left should clamp to 1.0")
+    assertApprox(r, 1.0, "Loud signal right should clamp to 1.0")
+    assert(l <= 1.0 && r <= 1.0, "Levels must never exceed 1.0")
+}
+
+func testRMSChannelsGuard() {
+    print("Test: computeRMSLevels — channels < 2 returns previous levels...")
+    // Guard: channels >= 2 required. Mono → returns previous unchanged.
+    let (l, r) = AudioCore.computeRMSLevels(
+        sampleAt: { _ in 1.0 },
+        totalSamples: 4096, channels: 1, frameCapacity: 4096,
+        writeIndex: 0, windowFrames: 1024,
+        previousLeft: 0.42, previousRight: 0.17, smoothing: 0.7)
+    assertApprox(l, 0.42, "channels<2 guard returns previousLeft")
+    assertApprox(r, 0.17, "channels<2 guard returns previousRight")
+}
+
+func testRMSOnePoleSmoothing() {
+    print("Test: computeRMSLevels — one-pole smoothing from 0...")
+    // DC 0.5 → rms 0.5. Starting from previous 0, smoothing 0.7:
+    //   new = 0*0.7 + 0.5*(1-0.7) = 0.15  (i.e. 0.3 * rms with r=0.5).
+    let r: Float = 0.5
+    let (l, rr) = AudioCore.computeRMSLevels(
+        sampleAt: { _ in r },
+        totalSamples: 4096 * 2, channels: 2, frameCapacity: 4096,
+        writeIndex: 0, windowFrames: 1024,
+        previousLeft: 0, previousRight: 0, smoothing: 0.7)
+    let expected: Float = 0.3 * r  // (1 - 0.7) * r
+    assertApprox(l, expected, "One-pole: single call from 0 gives 0.3*r")
+    assertApprox(rr, expected, "One-pole (right): single call from 0 gives 0.3*r")
+}
+
+// ============================================================================
+// MARK: - Ring-seam DATA correctness (memcpy/deinterleave wrap)
+// ============================================================================
+
+func testRingSeamDataCorrectness() {
+    print("Test: Ring-seam data correctness across the 4096-frame wrap...")
+    guard let writer = TestWriter() else { assert(false, "Writer creation failed"); return }
+    guard let reader = TestReader() else { assert(false, "Reader creation failed"); return }
+
+    // Advance write position to 4000 by writing (and consuming) filler, so the
+    // next real write straddles the 4096-frame boundary (4000 -> 4256, wraps at 4096).
+    let fillerFrames = 4000
+    let filler = UnsafeMutablePointer<Float32>.allocate(capacity: fillerFrames * 2)
+    defer { filler.deallocate() }
+    for i in 0..<(fillerFrames * 2) { filler[i] = -1.0 }
+    writer.write(from: filler, frameCount: fillerFrames)
+
+    let fdump = UnsafeMutablePointer<Float32>.allocate(capacity: fillerFrames)
+    let fdumpR = UnsafeMutablePointer<Float32>.allocate(capacity: fillerFrames)
+    defer { fdump.deallocate(); fdumpR.deallocate() }
+    _ = reader.read(into: [fdump, fdumpR], frameCount: fillerFrames)  // consume filler
+
+    // Write a known ramp of 256 frames straddling the wrap (writeIndex 4000 -> 4256).
+    let rampFrames = 256
+    let ramp = UnsafeMutablePointer<Float32>.allocate(capacity: rampFrames * 2)
+    defer { ramp.deallocate() }
+    for f in 0..<rampFrames {
+        // Left = f, Right = f + 10000 — distinct, easy to verify per channel & per frame.
+        ramp[f * 2] = Float32(f)
+        ramp[f * 2 + 1] = Float32(f) + 10000
+    }
+    writer.write(from: ramp, frameCount: rampFrames)
+
+    let left = UnsafeMutablePointer<Float32>.allocate(capacity: rampFrames)
+    let right = UnsafeMutablePointer<Float32>.allocate(capacity: rampFrames)
+    defer { left.deallocate(); right.deallocate() }
+
+    let n = reader.read(into: [left, right], frameCount: rampFrames)
+    assert(n == rampFrames, "Should read all \(rampFrames) ramp frames across wrap, got \(n)")
+
+    var seamOK = true
+    var firstBad = -1
+    for f in 0..<rampFrames {
+        if left[f] != Float32(f) || right[f] != Float32(f) + 10000 {
+            seamOK = false
+            if firstBad < 0 { firstBad = f }
+        }
+    }
+    assert(seamOK, "Ramp must survive the ring wrap exactly (first bad frame: \(firstBad))")
+    // Explicitly assert the samples immediately on either side of the 4096 seam.
+    // writeIndex was 4000; frame index 96 corresponds to absolute 4096 (the wrap point).
+    assertApprox(left[95], 95, "Sample just before seam (frame 95)")
+    assertApprox(left[96], 96, "Sample just after seam (frame 96 = absolute 4096)")
+    assertApprox(right[96], 96 + 10000, "Right channel across seam (frame 96)")
+}
+
+// ============================================================================
+// MARK: - Partial read (request > available)
+// ============================================================================
+
+func testPartialRead() {
+    print("Test: Partial read — request more than available, tail zero-filled...")
+    guard let writer = TestWriter() else { assert(false, "Writer creation failed"); return }
+    guard let reader = TestReader() else { assert(false, "Reader creation failed"); return }
+
+    // Write only 100 frames of known data.
+    let avail = 100
+    let src = UnsafeMutablePointer<Float32>.allocate(capacity: avail * 2)
+    defer { src.deallocate() }
+    for f in 0..<avail {
+        src[f * 2] = Float32(f) + 1       // left: 1..100
+        src[f * 2 + 1] = Float32(f) + 501 // right: 501..600
+    }
+    writer.write(from: src, frameCount: avail)
+
+    // Request 300 frames — more than the 100 available.
+    let req = 300
+    let left = UnsafeMutablePointer<Float32>.allocate(capacity: req)
+    let right = UnsafeMutablePointer<Float32>.allocate(capacity: req)
+    defer { left.deallocate(); right.deallocate() }
+    for i in 0..<req { left[i] = 777; right[i] = 777 }  // poison to catch missing zero-fill
+
+    let n = reader.read(into: [left, right], frameCount: req)
+    assert(n == avail, "Partial read should return \(avail) available frames, got \(n)")
+
+    // Head holds real data.
+    var headOK = true
+    for f in 0..<avail {
+        if left[f] != Float32(f) + 1 || right[f] != Float32(f) + 501 { headOK = false }
+    }
+    assert(headOK, "Head of partial read must hold the real 100 frames")
+
+    // Tail (frames avail..<req) must be zero-filled.
+    var tailOK = true
+    for f in avail..<req {
+        if left[f] != 0 || right[f] != 0 { tailOK = false }
+    }
+    assert(tailOK, "Tail of partial read must be zero-filled (not poison)")
+}
+
+// ============================================================================
 // MARK: - Run all tests
 // ============================================================================
 
@@ -464,6 +734,25 @@ testResync()
 testMonotonicWriteIndex()
 testLargeSequentialWriteRead()
 testCleanup()
+
+// AudioCore.computeReadPlan (real production ring-buffer math)
+testReadPlanNormal()
+testReadPlanUnderrun()
+testReadPlanDriverReset()
+testReadPlanFellBehind()
+testReadPlanClampsToCapacity()
+
+// AudioCore.computeRMSLevels (real production metering)
+testRMSSilence()
+testRMSFullScaleSine()
+testRMSDC()
+testRMSClampLoud()
+testRMSChannelsGuard()
+testRMSOnePoleSmoothing()
+
+// DATA-path coverage
+testRingSeamDataCorrectness()
+testPartialRead()
 
 print("\n=== Results: \(passCount)/\(testCount) passed, \(failCount) failed ===")
 
