@@ -366,10 +366,33 @@ install_driver_to_hal() {
     fi
 
     print_step "Updating driver in ${hal_dir} and restarting coreaudiod..."
-    osascript -e "do shell script \"rm -rf '${hal_dest}' && ditto '${driver_path}' '${hal_dest}' && killall coreaudiod\" with administrator privileges"
+
+    # Record the source binary's checksum so we can verify the copy actually landed.
+    local src_bin="${driver_path}/Contents/MacOS/AudioProfilesDriver"
+    local dst_bin="${hal_dest}/Contents/MacOS/AudioProfilesDriver"
+    local src_sum
+    src_sum=$(shasum -a 256 "$src_bin" 2>/dev/null | awk '{print $1}')
+
+    if ! osascript -e "do shell script \"rm -rf '${hal_dest}' && ditto '${driver_path}' '${hal_dest}' && killall coreaudiod\" with administrator privileges"; then
+        print_error "HAL driver update failed (admin authorization cancelled or command errored)."
+        print_error "The app was NOT updated in HAL. Re-run and authorize the admin prompt, or install via the app UI."
+        exit 1
+    fi
+
     # Give coreaudiod a moment to restart and load the new driver
     sleep 1
-    print_success "Driver updated in HAL and coreaudiod restarted."
+
+    # Verify the copy actually landed — the admin prompt can be dismissed without an error
+    # surfacing, which previously let this step falsely report success.
+    local dst_sum
+    dst_sum=$(shasum -a 256 "$dst_bin" 2>/dev/null | awk '{print $1}')
+    if [[ -z "$dst_sum" || "$src_sum" != "$dst_sum" ]]; then
+        print_error "HAL driver verification failed — installed binary does not match the built one."
+        print_error "  built:     ${src_sum:-<missing>}"
+        print_error "  installed: ${dst_sum:-<missing>}"
+        exit 1
+    fi
+    print_success "Driver updated in HAL and coreaudiod restarted (verified checksum match)."
 }
 
 # ── Deploy ────────────────────────────────────────────────────────────────────
