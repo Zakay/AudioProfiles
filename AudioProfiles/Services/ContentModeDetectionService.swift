@@ -34,6 +34,17 @@ final class ContentModeDetectionService: ObservableObject {
     private var nowPlayingInfo: [String: Any] = [:]
     private var nowPlayingAppName: String?
 
+    // MARK: - Mic safety re-evaluation
+    // The mic listener fires on the default-input device's IsRunningSomewhere transitions,
+    // but the voice decision is process-level (kAudioProcessPropertyIsRunningInput). Meeting
+    // apps (Teams/Zoom) often keep the mic stream open after a call ends, so the device
+    // event can fire while a process still claims input (→ stays Voice), and the later
+    // release may emit no further event → Voice would stay stuck. While mic-driven Voice is
+    // active, poll detect() at a low frequency so a lagging release still deactivates.
+    private var micSafetyTimer: Timer?
+    private let micSafetyInterval: TimeInterval = 3.0
+    private static let micSource = "Microphone active"
+
     private init() {
         AppLogger.info("ContentModeDetectionService: init called, isEnabled=\(SoundModesStore.shared.isEnabled)")
     }
@@ -52,6 +63,8 @@ final class ContentModeDetectionService: ObservableObject {
         unregisterMicListener()
         unregisterDefaultInputListener()
         unregisterNowPlayingNotifications()
+        micSafetyTimer?.invalidate()
+        micSafetyTimer = nil
         applyMode(.none, source: nil)
     }
 
@@ -71,7 +84,7 @@ final class ContentModeDetectionService: ObservableObject {
 
         // Priority 1: Mic active → Voice
         if isMicActiveForNonSelfProcess() {
-            applyMode(.voice, source: "Microphone active")
+            applyMode(.voice, source: Self.micSource)
             return
         }
 
@@ -90,10 +103,30 @@ final class ContentModeDetectionService: ObservableObject {
         detectedMode = mode
         sourceApp = source
         SoundModesStore.shared.setActiveMode(mode, sourceApp: source)
+        // Persistent diagnostics (NSLog survives in the unified log, unlike Logger.info)
+        // so content-mode transitions can be inspected after the fact.
+        NSLog("[CONTENT-DIAG] content mode → \(mode) (source: \(source ?? "none"))")
         if mode != .none {
             AppLogger.info("Content mode: \(mode.displayName) (source: \(source ?? "none"))")
         }
+        updateMicSafetyTimer()
         ProfileManager.shared.pipelineInvalidationSubject.send()
+    }
+
+    /// Runs a low-frequency re-`detect()` only while mic-driven Voice is active, so a lagging
+    /// mic release (meeting app holding the stream open past call end) still deactivates
+    /// even if no further Core Audio event fires. Idle otherwise — no polling in any other mode.
+    private func updateMicSafetyTimer() {
+        let shouldRun = (detectedMode == .voice && sourceApp == Self.micSource)
+        if shouldRun {
+            guard micSafetyTimer == nil else { return }
+            micSafetyTimer = Timer.scheduledTimer(withTimeInterval: micSafetyInterval, repeats: true) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.detect() }
+            }
+        } else {
+            micSafetyTimer?.invalidate()
+            micSafetyTimer = nil
+        }
     }
 
     // MARK: - Mic Detection (event-driven via Core Audio listener)
