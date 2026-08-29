@@ -131,6 +131,17 @@ struct SoundModesTabView: View {
 
     // MARK: - Modes List
 
+    /// Badge text for modes that are auto-detected from a live system signal, or nil for
+    /// modes with no automatic trigger. Voice detects from mic input; Music detects from a
+    /// known music app's audio output (see ContentModeDetectionService).
+    private func autoLabel(for mode: ContentModeType) -> String? {
+        switch mode {
+        case .voice: return "Auto · Mic"
+        case .music: return "Auto · Music"
+        default:     return nil
+        }
+    }
+
     private var modesList: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Modes")
@@ -146,8 +157,8 @@ struct SoundModesTabView: View {
                         HStack(spacing: 4) {
                             Text(mode.displayName)
                                 .font(.callout)
-                            if mode == .voice {
-                                Text("Auto · Mic")
+                            if let label = autoLabel(for: mode) {
+                                Text(label)
                                     .font(.caption2)
                                     .fontWeight(.medium)
                                     .padding(.horizontal, 5)
