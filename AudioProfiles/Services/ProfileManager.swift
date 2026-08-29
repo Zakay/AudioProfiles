@@ -311,8 +311,16 @@ class ProfileManager: ObservableObject {
             effectiveEQ = .flat
         }
 
-        // 7. Determine if virtual driver is needed
-        let needsVirtualDriver = !effectiveEQ.isFlat && EQInstallationService.shared.isInstalled
+        // 7. Determine if virtual driver is needed.
+        // While Sound Modes (auto content modes) is enabled, keep the pipeline engaged even
+        // when the EQ is currently flat. Content-mode changes then become in-place EQ updates
+        // on the already-running pipeline (seamless) instead of switching the system's default
+        // output device between native and virtual on every change — which caused an audible
+        // glitch and virtual-device appear/disappear churn. The master EQ toggle
+        // (isProcessingBypassed) still fully disengages to the native path.
+        let installed = EQInstallationService.shared.isInstalled
+        let keepEngagedForAutoModes = SoundModesStore.shared.isEnabled && !isProcessingBypassed
+        let needsVirtualDriver = installed && (!effectiveEQ.isFlat || keepEngagedForAutoModes)
 
         // 8. Fingerprint check — skip if unchanged
         let fingerprint = PipelineFingerprint(
