@@ -41,9 +41,20 @@ final class ContentModeDetectionService: ObservableObject {
     // event can fire while a process still claims input (→ stays Voice), and the later
     // release may emit no further event → Voice would stay stuck. While mic-driven Voice is
     // active, poll detect() at a low frequency so a lagging release still deactivates.
-    private var micSafetyTimer: Timer?
-    private let micSafetyInterval: TimeInterval = 3.0
+    private var detectionSafetyTimer: Timer?
+    private let detectionSafetyInterval: TimeInterval = 3.0
     private static let micSource = "Microphone active"
+
+    // MARK: - Music output detection
+    // Now Playing (MediaRemote) is restricted on macOS 15.4+ and returns nothing to
+    // unentitled apps, so Music can't be classified from metadata anymore. Instead we
+    // detect when a known music app is actively OUTPUTTING audio via Core Audio process
+    // objects (kAudioProcessPropertyIsRunningOutput) — the output twin of the mic check.
+    // Extend this set to map more apps to Music mode.
+    private static let musicAppBundleIDs: Set<String> = [
+        "com.spotify.client",   // Spotify
+        "com.apple.Music",      // Apple Music
+    ]
 
     private init() {
         AppLogger.info("ContentModeDetectionService: init called, isEnabled=\(SoundModesStore.shared.isEnabled)")
@@ -56,15 +67,19 @@ final class ContentModeDetectionService: ObservableObject {
         registerNowPlayingNotifications()
         registerDefaultInputListener()
         registerMicListener()
+        registerDefaultOutputListener()
+        registerOutputListener()
         detect()
     }
 
     func stopDetection() {
         unregisterMicListener()
         unregisterDefaultInputListener()
+        unregisterOutputListener()
+        unregisterDefaultOutputListener()
         unregisterNowPlayingNotifications()
-        micSafetyTimer?.invalidate()
-        micSafetyTimer = nil
+        detectionSafetyTimer?.invalidate()
+        detectionSafetyTimer = nil
         applyMode(.none, source: nil)
     }
 
@@ -82,19 +97,25 @@ final class ContentModeDetectionService: ObservableObject {
             return
         }
 
-        // Priority 1: Mic active → Voice
+        // Priority 1: Mic active → Voice (kept above music so meetings win over background audio)
         if isMicActiveForNonSelfProcess() {
             applyMode(.voice, source: Self.micSource)
             return
         }
 
-        // Priority 2: Now Playing metadata
+        // Priority 2: A known music app is actively outputting audio → Music
+        if let app = musicAppOutputting() {
+            applyMode(.music, source: app)
+            return
+        }
+
+        // Priority 3: Now Playing metadata (best-effort — empty on macOS 15.4+ for unentitled apps)
         if let (mode, source) = detectFromMediaMetadata() {
             applyMode(mode, source: source)
             return
         }
 
-        // Priority 3: Nothing detected → .none
+        // Priority 4: Nothing detected → .none
         applyMode(.none, source: nil)
     }
 
@@ -109,23 +130,26 @@ final class ContentModeDetectionService: ObservableObject {
         if mode != .none {
             AppLogger.info("Content mode: \(mode.displayName) (source: \(source ?? "none"))")
         }
-        updateMicSafetyTimer()
+        updateDetectionSafetyTimer()
         ProfileManager.shared.pipelineInvalidationSubject.send()
     }
 
-    /// Runs a low-frequency re-`detect()` only while mic-driven Voice is active, so a lagging
-    /// mic release (meeting app holding the stream open past call end) still deactivates
-    /// even if no further Core Audio event fires. Idle otherwise — no polling in any other mode.
-    private func updateMicSafetyTimer() {
-        let shouldRun = (detectedMode == .voice && sourceApp == Self.micSource)
+    /// Runs a low-frequency re-`detect()` only while an auto-detected live-signal mode is
+    /// active (Voice from mic, or Music from audio output). Those signals can stop without
+    /// emitting a Core Audio event (an app holding the stream open past use), so the poll
+    /// ensures deactivation. Idle in every other state — no polling when nothing is detected
+    /// or when the user has pinned a manual override.
+    private func updateDetectionSafetyTimer() {
+        let isAuto = SoundModesStore.shared.manualOverride == nil
+        let shouldRun = isAuto && (detectedMode == .voice || detectedMode == .music)
         if shouldRun {
-            guard micSafetyTimer == nil else { return }
-            micSafetyTimer = Timer.scheduledTimer(withTimeInterval: micSafetyInterval, repeats: true) { [weak self] _ in
+            guard detectionSafetyTimer == nil else { return }
+            detectionSafetyTimer = Timer.scheduledTimer(withTimeInterval: detectionSafetyInterval, repeats: true) { [weak self] _ in
                 Task { @MainActor [weak self] in self?.detect() }
             }
         } else {
-            micSafetyTimer?.invalidate()
-            micSafetyTimer = nil
+            detectionSafetyTimer?.invalidate()
+            detectionSafetyTimer = nil
         }
     }
 
@@ -179,6 +203,149 @@ final class ContentModeDetectionService: ObservableObject {
         }
 
         return false
+    }
+
+    // MARK: - Music Output Detection (event-driven via Core Audio process objects)
+
+    /// If a known music app (see `musicAppBundleIDs`) is actively outputting audio, returns
+    /// its display name; otherwise nil. This is the output twin of the mic-input check and
+    /// needs no special permission. Our own process is excluded.
+    private func musicAppOutputting() -> String? {
+        let myPID = ProcessInfo.processInfo.processIdentifier
+        for processObj in audioProcessObjects() {
+            // 'piro' kAudioProcessPropertyIsRunningOutput
+            guard processU32(processObj, 0x7069726F) != 0 else { continue }
+            let pid = processPID(processObj)
+            if pid == myPID { continue }
+            // 'pbid' kAudioProcessPropertyBundleID
+            guard let bundleID = processString(processObj, 0x70626964),
+                  Self.musicAppBundleIDs.contains(bundleID) else { continue }
+            let name = NSRunningApplication(processIdentifier: pid)?.localizedName
+            return name ?? bundleID
+        }
+        return nil
+    }
+
+    // MARK: - Core Audio process-object helpers
+
+    private func audioProcessObjects() -> [AudioObjectID] {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: AudioObjectPropertySelector(0x70727323), // 'prs#' kAudioHardwarePropertyProcessObjectList
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var dataSize: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &dataSize) == noErr else { return [] }
+        let count = Int(dataSize) / MemoryLayout<AudioObjectID>.size
+        guard count > 0 else { return [] }
+        var ids = [AudioObjectID](repeating: 0, count: count)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &dataSize, &ids) == noErr else { return [] }
+        return ids
+    }
+
+    private func processU32(_ obj: AudioObjectID, _ selector: UInt32) -> UInt32 {
+        var addr = AudioObjectPropertyAddress(mSelector: selector, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var value: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        return AudioObjectGetPropertyData(obj, &addr, 0, nil, &size, &value) == noErr ? value : 0
+    }
+
+    private func processPID(_ obj: AudioObjectID) -> pid_t {
+        var addr = AudioObjectPropertyAddress(mSelector: AudioObjectPropertySelector(0x70706964), mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain) // 'ppid'
+        var pid: pid_t = 0
+        var size = UInt32(MemoryLayout<pid_t>.size)
+        return AudioObjectGetPropertyData(obj, &addr, 0, nil, &size, &pid) == noErr ? pid : 0
+    }
+
+    private func processString(_ obj: AudioObjectID, _ selector: UInt32) -> String? {
+        var addr = AudioObjectPropertyAddress(mSelector: selector, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var cf: CFString? = nil
+        var size = UInt32(MemoryLayout<CFString?>.size)
+        let status = withUnsafeMutableBytes(of: &cf) { AudioObjectGetPropertyData(obj, &addr, 0, nil, &size, $0.baseAddress!) }
+        return status == noErr ? (cf as String?) : nil
+    }
+
+    // MARK: - Output "is running" listener (event-driven music start/stop trigger)
+
+    private var outputListenerBlock: AudioObjectPropertyListenerBlock?
+    private var outputListenerDeviceID: AudioObjectID = 0
+
+    /// Listen to the default OUTPUT device's "is running somewhere" property so detection
+    /// re-runs whenever audio output starts or stops (music start/stop trigger).
+    private func registerOutputListener() {
+        guard outputListenerBlock == nil else { return }
+
+        var defaultOutputAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var outputDeviceID: AudioObjectID = 0
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &defaultOutputAddr, 0, nil, &size, &outputDeviceID)
+        guard outputDeviceID != kAudioObjectUnknown else { return }
+
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            Task { @MainActor [weak self] in self?.detect() }
+        }
+        outputListenerBlock = block
+        if AudioObjectAddPropertyListenerBlock(outputDeviceID, &addr, DispatchQueue.main, block) == noErr {
+            outputListenerDeviceID = outputDeviceID
+        } else {
+            outputListenerBlock = nil
+        }
+    }
+
+    private func unregisterOutputListener() {
+        guard let block = outputListenerBlock, outputListenerDeviceID != 0 else { return }
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        AudioObjectRemovePropertyListenerBlock(outputListenerDeviceID, &addr, DispatchQueue.main, block)
+        outputListenerBlock = nil
+        outputListenerDeviceID = 0
+    }
+
+    // MARK: - Default Output Device Change Listener
+
+    private var defaultOutputListenerBlock: AudioObjectPropertyListenerBlock?
+
+    /// Re-register the output listener when the default output device changes.
+    private func registerDefaultOutputListener() {
+        guard defaultOutputListenerBlock == nil else { return }
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                self.unregisterOutputListener()
+                self.registerOutputListener()
+                self.detect()
+            }
+        }
+        defaultOutputListenerBlock = block
+        AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &addr, DispatchQueue.main, block)
+    }
+
+    private func unregisterDefaultOutputListener() {
+        guard let block = defaultOutputListenerBlock else { return }
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &addr, DispatchQueue.main, block)
+        defaultOutputListenerBlock = nil
     }
 
     /// Listen to the default input device's "is running" property.
