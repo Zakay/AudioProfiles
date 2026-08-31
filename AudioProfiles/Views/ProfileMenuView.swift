@@ -10,10 +10,12 @@ struct ProfileMenuView: View {
     @Environment(\.dismiss) private var dismissPopover
     @ObservedObject var viewModel: StatusBarViewModel
     @StateObject private var profileManager = ProfileManager.shared
+    @ObservedObject private var installService = EQInstallationService.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             profileHeader
+            masterProcessingRow
             currentDevicesSection
             triggerEventRow
             AudioStatusIndicators()
@@ -47,6 +49,38 @@ struct ProfileMenuView: View {
         }
         .padding(12)
         .frame(minWidth: 220)
+    }
+
+    // MARK: - Master Processing Toggle
+
+    /// Master switch: when off, the app leaves the audio path entirely and audio goes to the
+    /// hardware output directly (no EQ, no virtual driver). Bound to the same processing-bypass
+    /// state as the EQ tab and EQ quick-access row. Only shown when the driver is installed —
+    /// without it there is no processing to disable.
+    @ViewBuilder
+    private var masterProcessingRow: some View {
+        if installService.isInstalled {
+            HStack(spacing: 0) {
+                Image(systemName: profileManager.isProcessingBypassed ? "waveform.slash" : "waveform")
+                    .foregroundColor(profileManager.isProcessingBypassed ? .secondary : .accentColor)
+                    .frame(width: 16, height: 16)
+                    .frame(width: 24)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Audio Processing")
+                    Text(profileManager.isProcessingBypassed ? "Off · using hardware output" : "On · EQ & sound modes active")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                Toggle("", isOn: Binding(
+                    get: { !profileManager.isProcessingBypassed },
+                    set: { on in profileManager.setProcessingBypassed(!on) }
+                ))
+                .toggleStyle(.switch)
+                .labelsHidden()
+                .help("Turn off to bypass the app and send audio straight to the hardware output")
+            }
+        }
     }
 
     // MARK: - Header

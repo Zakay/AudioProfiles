@@ -22,7 +22,7 @@ final class AudioPipelineService {
     ///   - inputDevice: Resolved input AudioDevice (nil = no change / keep current)
     ///   - effectiveEQ: Combined L1+L2+L3 EQ settings
     ///   - needsVirtualDriver: Whether the virtual driver should be active
-    ///   - virtualDeviceName: Display name for the virtual device (e.g. "AirPods Pro EQ")
+    ///   - virtualDeviceName: Display name for the virtual device (e.g. "AirPods Pro (Virtual)")
     ///   - outputDeviceUID: UID of the real output device (for EQ engine calls)
     func apply(
         outputDevice: AudioDevice?,

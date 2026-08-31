@@ -809,6 +809,12 @@ final class EQEngineService: ObservableObject {
         currentRequest = nil
         pipelineState = .idle
         EQRouteRecoveryStore.clear()
+
+        // EQ-follows: treat the user's manual output pick as the new intended device and
+        // re-evaluate. If processing is still warranted (Sound Modes on, or that device has its
+        // own EQ), the pipeline re-engages on it (startPipeline restores the virtual device as
+        // default); otherwise audio simply stays on the chosen hardware natively.
+        ProfileManager.shared.selectManualOutputDevice(selectedDevice.id)
     }
 
     func stopSafe(switchTo realDeviceUID: String) {

@@ -70,6 +70,10 @@ class ProfileManager: ObservableObject {
         didSet { UserDefaults.standard.set(lastManualSwitchTimestamp?.timeIntervalSince1970, forKey: "lastManualSwitchTimestamp") }
     }
 
+    /// Output device the user picked outside the app (macOS Sound menu). Session-only override
+    /// that makes the pipeline follow that device; cleared on profile change or when it disconnects.
+    private(set) var manualOutputDeviceUID: String?
+
 
     // MARK: - evaluateAndApply state
 
@@ -235,19 +239,35 @@ class ProfileManager: ObservableObject {
         var resolvedOutputDevice: AudioDevice?
         var resolvedOutputUID: String?
 
-        for deviceID in outputList {
-            if let device = devices.first(where: { $0.id == deviceID && $0.isOutput }) {
-                // Check if this is our virtual device — if so, look through to the real device
-                if EQDriverService.shared.isOurVirtualDevice(device.id) {
-                    if EQEngineService.shared.isRunning, let realUID = EQEngineService.shared.targetDeviceUID {
-                        resolvedOutputUID = realUID
-                        resolvedOutputDevice = devices.first { $0.id == realUID && $0.isOutput }
+        // Manual output override: when the user picks an output device outside the app (macOS
+        // Sound menu / Control Center), honor that choice above the profile's priority list so
+        // the pipeline follows the user's device instead of yanking back to a priority device.
+        // The override is dropped once that device disconnects (falls back to normal resolution).
+        if let manualUID = manualOutputDeviceUID {
+            if let device = devices.first(where: { $0.id == manualUID && $0.isOutput }),
+               !EQDriverService.shared.isOurVirtualDevice(device.id) {
+                resolvedOutputDevice = device
+                resolvedOutputUID = device.id
+            } else {
+                manualOutputDeviceUID = nil
+            }
+        }
+
+        if resolvedOutputDevice == nil {
+            for deviceID in outputList {
+                if let device = devices.first(where: { $0.id == deviceID && $0.isOutput }) {
+                    // Check if this is our virtual device — if so, look through to the real device
+                    if EQDriverService.shared.isOurVirtualDevice(device.id) {
+                        if EQEngineService.shared.isRunning, let realUID = EQEngineService.shared.targetDeviceUID {
+                            resolvedOutputUID = realUID
+                            resolvedOutputDevice = devices.first { $0.id == realUID && $0.isOutput }
+                        }
+                    } else {
+                        resolvedOutputDevice = device
+                        resolvedOutputUID = device.id
                     }
-                } else {
-                    resolvedOutputDevice = device
-                    resolvedOutputUID = device.id
+                    break
                 }
-                break
             }
         }
 
@@ -342,7 +362,9 @@ class ProfileManager: ObservableObject {
         lastFingerprint = fingerprint
 
         // 9. Build virtual device name
-        let virtualDeviceName = resolvedOutputDevice.map { "\($0.name) EQ" }
+        // The virtual device is the routing endpoint for our driver — EQ may be flat (pure
+        // passthrough while Sound Modes waits for a mode), so name it for routing, not "EQ".
+        let virtualDeviceName = resolvedOutputDevice.map { "\($0.name) (Virtual)" }
 
         // 10. Apply via pipeline service
         pipelineService.apply(
@@ -381,6 +403,17 @@ class ProfileManager: ObservableObject {
 
     // updateRemainingTimeDisplay and getRemainingDisableTime removed —
     // auto-switching is now a simple on/off toggle with no timed duration.
+
+    /// Called when the user selects an output device outside the app (macOS Sound menu /
+    /// Control Center). Records it as an override so the EQ pipeline follows that device
+    /// (EQ-follows) rather than snapping back to a profile-priority device, then re-evaluates.
+    func selectManualOutputDevice(_ uid: String) {
+        guard manualOutputDeviceUID != uid else { return }
+        AppLogger.info("Manual output device selected: \(uid) — pipeline will follow it")
+        manualOutputDeviceUID = uid
+        lastFingerprint = nil
+        evaluateAndApply()
+    }
 
     /// True while a manual profile selection is overriding automatic switching.
     /// Used to protect the manual choice from being clobbered by unrelated device
@@ -439,6 +472,10 @@ class ProfileManager: ObservableObject {
             return
         }
 
+        // A new profile's priority lists supersede any manual output-device override.
+        if activeProfile?.id != profile.id {
+            manualOutputDeviceUID = nil
+        }
         activeProfile = profile
 
         // Use restored mode if provided (persisted from last session), otherwise profile's preferred mode
