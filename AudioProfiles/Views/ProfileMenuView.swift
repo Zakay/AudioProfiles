@@ -60,26 +60,40 @@ struct ProfileMenuView: View {
     @ViewBuilder
     private var masterProcessingRow: some View {
         if installService.isInstalled {
-            HStack(spacing: 0) {
-                Image(systemName: profileManager.isProcessingBypassed ? "waveform.slash" : "waveform")
-                    .foregroundColor(profileManager.isProcessingBypassed ? .secondary : .accentColor)
-                    .frame(width: 16, height: 16)
-                    .frame(width: 24)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Audio Processing")
-                    Text(profileManager.isProcessingBypassed ? "Off · using hardware output" : "On · EQ & sound modes active")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+            let on = !profileManager.isProcessingBypassed
+            Button {
+                profileManager.setProcessingBypassed(on)
+            } label: {
+                HStack(spacing: 0) {
+                    Image(systemName: on ? "waveform" : "waveform.slash")
+                        .foregroundColor(on ? .accentColor : .secondary)
+                        .frame(width: 16, height: 16)
+                        .frame(width: 24)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Audio Processing")
+                        Text(on ? "On · EQ & sound modes active" : "Off · using hardware output")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer()
+                    // Custom switch drawn from shapes rather than a system Toggle: a system
+                    // .switch renders in the inactive (grey) appearance while the menu-bar
+                    // popover window isn't key, so it looked grey-when-on until toggled. Shape
+                    // fills aren't subject to that control dimming, so this stays accent-colored.
+                    Capsule()
+                        .fill(on ? Color.accentColor : Color.secondary.opacity(0.35))
+                        .frame(width: 32, height: 18)
+                        .overlay(
+                            Circle()
+                                .fill(Color.white)
+                                .frame(width: 14, height: 14)
+                                .offset(x: on ? 7 : -7)
+                        )
+                        .animation(.easeInOut(duration: 0.15), value: on)
                 }
-                Spacer()
-                Toggle("", isOn: Binding(
-                    get: { !profileManager.isProcessingBypassed },
-                    set: { on in profileManager.setProcessingBypassed(!on) }
-                ))
-                .toggleStyle(.switch)
-                .labelsHidden()
-                .help("Turn off to bypass the app and send audio straight to the hardware output")
             }
+            .buttonStyle(MenuRowButtonStyle())
+            .help("Turn off to bypass the app and send audio straight to the hardware output")
         }
     }
 
