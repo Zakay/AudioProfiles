@@ -74,11 +74,11 @@ struct ProfileMenuView: View {
 
     private var statusHeader: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
+            HStack(spacing: 0) {
                 Image(systemName: currentProfileIcon)
                     .foregroundColor(isSystemDefaultActive ? .secondary
                                      : (profileManager.activeMode == .public ? .blue : .purple))
-                    .frame(width: 20)
+                    .frame(width: 24)
                 Text(profileManager.activeProfile?.name ?? viewModel.title)
                     .font(.headline)
                     .lineLimit(1)
@@ -93,7 +93,9 @@ struct ProfileMenuView: View {
                 deviceRow(icon: "mic", name: input)
             }
         }
-        .padding(.horizontal, 8)
+        // Match MenuRowButtonStyle's horizontal content inset (12) so the header icons/text
+        // line up with the toggle rows below.
+        .padding(.horizontal, 12)
         .padding(.top, 2)
     }
 
@@ -116,11 +118,12 @@ struct ProfileMenuView: View {
     }
 
     private func deviceRow(icon: String, name: String) -> some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 0) {
             Image(systemName: icon)
                 .foregroundColor(.secondary)
                 .font(.caption)
-                .frame(width: 20)
+                .frame(width: 16, height: 16)
+                .frame(width: 24)
             Text(name).font(.caption).foregroundColor(.secondary).lineLimit(1)
         }
     }
