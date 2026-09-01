@@ -16,7 +16,7 @@ struct ProfileMenuView: View {
             Divider()
 
             if installService.isInstalled {
-                featureToggle(icon: "power", title: "Audio Processing",
+                featureToggle(icon: "power", title: "Enabled",
                               isOn: !profileManager.isProcessingBypassed) {
                     profileManager.setProcessingBypassed(!profileManager.isProcessingBypassed)
                 }
@@ -131,7 +131,7 @@ struct ProfileMenuView: View {
     // MARK: - Uniform feature toggle
 
     /// One feature row with the shared AccentSwitch. `subordinate` rows dim when the master
-    /// Audio Processing switch is off (they have no effect while the app is bypassed).
+    /// "Enabled" switch is off (they have no effect while the app is disabled).
     private func featureToggle(icon: String, title: String, isOn: Bool,
                                subordinate: Bool = false, action: @escaping () -> Void) -> some View {
         let dimmed = subordinate && profileManager.isProcessingBypassed
