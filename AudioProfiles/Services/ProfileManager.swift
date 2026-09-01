@@ -79,6 +79,16 @@ class ProfileManager: ObservableObject {
         evaluateAndApply()
     }
 
+    /// Global on/off for the per-device EQ layer (independent of content-mode overlays).
+    @Published private(set) var isEQEnabled: Bool = true
+
+    func setEQEnabled(_ enabled: Bool) {
+        isEQEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "com.audioprofiles.eqEnabled")
+        lastFingerprint = nil
+        evaluateAndApply()
+    }
+
     @Published private(set) var isAutoSwitchingDisabled: Bool = false
 
     // Timestamp-based manual override tracking — persisted so force-quit doesn't lose it
@@ -150,6 +160,9 @@ class ProfileManager: ObservableObject {
         // content-mode changes). Only override the default when the user has explicitly set it.
         if UserDefaults.standard.object(forKey: "com.audioprofiles.alwaysOnProcessing") != nil {
             alwaysOnProcessing = UserDefaults.standard.bool(forKey: "com.audioprofiles.alwaysOnProcessing")
+        }
+        if UserDefaults.standard.object(forKey: "com.audioprofiles.eqEnabled") != nil {
+            isEQEnabled = UserDefaults.standard.bool(forKey: "com.audioprofiles.eqEnabled")
         }
 
         // Load profiles from UserDefaults (no Core Audio calls — safe during init)
@@ -366,7 +379,7 @@ class ProfileManager: ObservableObject {
         // 6. Compute effective EQ
         guard let outputUID = resolvedOutputUID else { return }
 
-        let baseEQ = EQStore.shared.settings(for: outputUID)
+        let baseEQ = isEQEnabled ? EQStore.shared.settings(for: outputUID) : .flat
         let overlay = SoundModesStore.shared.activeOverlay()
         var effectiveEQ = EQSettings.combine(base: baseEQ, overlay: overlay)
 

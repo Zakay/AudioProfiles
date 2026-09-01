@@ -1,15 +1,13 @@
 import SwiftUI
 
-/// Main menu bar popover — current status, global controls, quick profile switch, and actions.
-///
-/// Sub-components live in their own files:
-/// - EQQuickAccessRow.swift
-/// - ContentModesRow.swift
+/// Main menu bar popover — current status, a uniform set of feature toggles, quick profile
+/// switch, and actions.
 struct ProfileMenuView: View {
     @Environment(\.dismiss) private var dismissPopover
     @ObservedObject var viewModel: StatusBarViewModel
     @StateObject private var profileManager = ProfileManager.shared
     @ObservedObject private var installService = EQInstallationService.shared
+    @ObservedObject private var soundModes = SoundModesStore.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -17,10 +15,36 @@ struct ProfileMenuView: View {
 
             Divider()
 
-            masterProcessingRow
-            autoSwitchRow
-            EQQuickAccessRow()
-            ContentModesRow()
+            if installService.isInstalled {
+                featureToggle(icon: "power", title: "Audio Processing",
+                              isOn: !profileManager.isProcessingBypassed) {
+                    profileManager.setProcessingBypassed(!profileManager.isProcessingBypassed)
+                }
+                featureToggle(icon: "infinity", title: "Always-on processing",
+                              isOn: profileManager.alwaysOnProcessing, subordinate: true) {
+                    profileManager.setAlwaysOnProcessing(!profileManager.alwaysOnProcessing)
+                }
+            }
+
+            featureToggle(icon: "bolt", title: "Auto-switch Profiles",
+                          isOn: !profileManager.isAutoSwitchingDisabled, subordinate: true) {
+                if profileManager.isAutoSwitchingDisabled {
+                    profileManager.enableAutoSwitching()
+                } else {
+                    profileManager.disableAutoSwitching()
+                }
+            }
+
+            if installService.isInstalled {
+                featureToggle(icon: "slider.vertical.3", title: "EQ",
+                              isOn: profileManager.isEQEnabled, subordinate: true) {
+                    profileManager.setEQEnabled(!profileManager.isEQEnabled)
+                }
+                featureToggle(icon: "waveform", title: "Content Modes",
+                              isOn: soundModes.isEnabled, subordinate: true) {
+                    soundModes.setEnabled(!soundModes.isEnabled)
+                }
+            }
 
             if hasUserProfiles {
                 Divider()
@@ -73,8 +97,8 @@ struct ProfileMenuView: View {
         .padding(.top, 2)
     }
 
-    /// Public/Private switch — only meaningful when the active profile is configured with
-    /// different device priorities for the two modes.
+    /// Public/Private switch — only shown when the active profile has different device
+    /// priorities for the two modes (so switching actually changes something).
     private var modeToggle: some View {
         Button(action: { ProfileManager.shared.toggleMode() }) {
             HStack(spacing: 4) {
@@ -101,54 +125,24 @@ struct ProfileMenuView: View {
         }
     }
 
-    // MARK: - Master Processing Toggle
+    // MARK: - Uniform feature toggle
 
-    /// Master switch: when off, the app is passive — audio goes straight to the hardware output
-    /// (no EQ, no content modes) and profile auto-switching is paused. Shown only when the driver
-    /// is installed.
-    @ViewBuilder
-    private var masterProcessingRow: some View {
-        if installService.isInstalled {
-            let on = !profileManager.isProcessingBypassed
-            Button {
-                profileManager.setProcessingBypassed(on)
-            } label: {
-                HStack(spacing: 0) {
-                    Image(systemName: on ? "waveform" : "waveform.slash")
-                        .foregroundColor(on ? .accentColor : .secondary)
-                        .frame(width: 16, height: 16)
-                        .frame(width: 24)
-                    Text("Audio Processing")
-                    Spacer()
-                    AccentSwitch(isOn: on)
-                }
-            }
-            .buttonStyle(MenuRowButtonStyle())
-            .help("Turn off to bypass the app: audio goes to the hardware output and auto-switching pauses")
-        }
-    }
-
-    // MARK: - Auto-Switch Row
-
-    private var autoSwitchRow: some View {
-        Button {
-            if profileManager.isAutoSwitchingDisabled {
-                profileManager.enableAutoSwitching()
-            } else {
-                profileManager.disableAutoSwitching()
-            }
-        } label: {
-            HStack {
-                Image(systemName: "bolt")
-                    .foregroundColor(profileManager.isAutoSwitchingDisabled ? .secondary : .accentColor)
+    /// One feature row with the shared AccentSwitch. `subordinate` rows dim when the master
+    /// Audio Processing switch is off (they have no effect while the app is bypassed).
+    private func featureToggle(icon: String, title: String, isOn: Bool,
+                               subordinate: Bool = false, action: @escaping () -> Void) -> some View {
+        let dimmed = subordinate && profileManager.isProcessingBypassed
+        return Button(action: action) {
+            HStack(spacing: 0) {
+                Image(systemName: icon)
+                    .foregroundColor(isOn && !dimmed ? .accentColor : .secondary)
                     .frame(width: 16, height: 16)
                     .frame(width: 24)
-                Text("Auto-switch Profiles")
+                Text(title)
                 Spacer()
-                Text(profileManager.isAutoSwitchingDisabled ? "Off" : "On")
-                    .font(.caption)
-                    .foregroundColor(profileManager.isAutoSwitchingDisabled ? .secondary : .green)
+                AccentSwitch(isOn: isOn)
             }
+            .opacity(dimmed ? 0.5 : 1)
         }
         .buttonStyle(MenuRowButtonStyle())
     }
@@ -186,8 +180,6 @@ struct ProfileMenuView: View {
         profileManager.profiles.contains { !$0.isSystemDefault }
     }
 
-    /// True when the active profile has different device priorities for Public vs Private,
-    /// so switching mode actually changes something.
     private var activeProfileHasModes: Bool {
         guard let p = profileManager.activeProfile, !p.isSystemDefault else { return false }
         return p.publicOutputPriority != p.privateOutputPriority
