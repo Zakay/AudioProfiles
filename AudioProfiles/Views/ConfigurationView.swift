@@ -31,7 +31,7 @@ struct ConfigurationView: View {
             SoundModesTabView()
                 .tabItem { Label("Content Modes", systemImage: "waveform") }
         }
-        .frame(width: 530)
+        .frame(width: 600)
         .fixedSize(horizontal: false, vertical: true)
         .sheet(isPresented: $showAddProfileSheet) {
             let newProfile = ProfileManager.shared.createNewProfileInstance()

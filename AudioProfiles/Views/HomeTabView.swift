@@ -16,9 +16,10 @@ struct HomeTabView: View {
     @AppStorage("showAutoSwitchNotifications") private var showNotifications = true
 
     var body: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: 14) {
             masterCard
-            statusCard
+            eqPreviewCard
+            statusPills
             settingsCard
         }
         .padding(.horizontal)
@@ -73,75 +74,90 @@ struct HomeTabView: View {
         }
     }
 
-    // MARK: - Status
+    // MARK: - EQ preview
 
     private var activeOutputUID: String? {
         profileManager.activeOutputDeviceUID ?? engine.targetDeviceUID
     }
 
-    private var contentModeText: String {
-        guard soundModes.isEnabled else { return "Disabled" }
-        guard soundModes.activeContentMode != .none else { return "None" }
-        if let src = soundModes.activeSourceApp {
-            return "\(soundModes.activeContentMode.displayName) · \(src)"
+    @ViewBuilder
+    private var eqPreviewCard: some View {
+        if installService.isInstalled, let uid = activeOutputUID {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text(profileManager.activeOutputDeviceName ?? "Output")
+                        .font(.subheadline).fontWeight(.medium)
+                    Spacer()
+                    Text("Edit in EQ tab")
+                        .font(.caption2).foregroundColor(.secondary)
+                }
+                // Read-only preview of the current curve for the active output, including any
+                // active content-mode overlay. Editing happens in the EQ tab.
+                InteractiveEQGraphView(
+                    settings: eqStore.settings(for: uid),
+                    selectedBand: .constant(nil),
+                    frequencyResponse: nil,
+                    contentOverlay: (soundModes.isEnabled && !profileManager.isProcessingBypassed)
+                        ? soundModes.activeOverlay() : nil,
+                    onChange: { _ in }
+                )
+                .frame(height: 150)
+                .allowsHitTesting(false)
+                .opacity(profileManager.isProcessingBypassed ? 0.4 : 1)
+            }
+            .padding()
+            .background(Color(NSColor.controlBackgroundColor))
+            .cornerRadius(12)
         }
-        return soundModes.activeContentMode.displayName
     }
 
-    private var eqText: String {
-        guard let uid = activeOutputUID else { return "—" }
-        if profileManager.isProcessingBypassed { return "Bypassed" }
-        if eqStore.isBypassed(for: uid) { return "Bypassed (device)" }
-        let settings = eqStore.settings(for: uid)
-        if settings.isFlat { return "Off" }
-        switch eqStore.mode(for: uid) {
-        case .custom: return "Custom"
-        case .preset(let name, _): return name
-        }
+    // MARK: - Status pills
+
+    private struct Pill: Identifiable {
+        let id = UUID()
+        let text: String
+        let systemImage: String
+        let color: Color
     }
 
-    private var statusCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Now")
-                .font(.headline)
-
-            statusRow("Profile",
-                      value: profileManager.activeProfile?.name ?? "—",
-                      systemImage: profileManager.activeProfile?.iconName ?? "person.2")
-            statusRow("Mode",
-                      value: profileManager.activeMode == .public ? "Public" : "Private",
-                      systemImage: profileManager.activeMode == .public ? "speaker.wave.2" : "headphones")
-            statusRow("Output",
-                      value: profileManager.activeOutputDeviceName ?? "—",
-                      systemImage: "hifispeaker")
-            statusRow("Input",
-                      value: profileManager.activeInputDeviceName ?? "—",
-                      systemImage: "mic")
-            statusRow("EQ", value: eqText, systemImage: "slider.vertical.3")
-            statusRow("Content Mode", value: contentModeText, systemImage: "waveform")
-            statusRow("Routing",
-                      value: engine.isRunning ? "Through AudioProfiles" : "Direct to hardware",
-                      systemImage: engine.isRunning ? "arrow.triangle.branch" : "arrow.right")
+    private var pills: [Pill] {
+        var result: [Pill] = []
+        if let profile = profileManager.activeProfile {
+            result.append(Pill(text: profile.name, systemImage: profile.iconName, color: .accentColor))
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding()
-        .background(Color(NSColor.controlBackgroundColor))
-        .cornerRadius(12)
+        let isPublic = profileManager.activeMode == .public
+        result.append(Pill(text: isPublic ? "Public" : "Private",
+                           systemImage: isPublic ? "speaker.wave.2" : "headphones",
+                           color: isPublic ? .blue : .purple))
+
+        if soundModes.isEnabled, soundModes.activeContentMode != .none {
+            result.append(Pill(text: soundModes.activeContentMode.displayName,
+                               systemImage: "waveform", color: .green))
+        }
+        if soundModes.nightMode.isEnabled, soundModes.isNightModeActive {
+            result.append(Pill(text: "Night", systemImage: "moon.fill", color: .indigo))
+        }
+        result.append(engine.isRunning
+                      ? Pill(text: "Routed", systemImage: "arrow.triangle.branch", color: .green)
+                      : Pill(text: "Direct", systemImage: "arrow.right", color: .secondary))
+        return result
     }
 
-    private func statusRow(_ label: String, value: String, systemImage: String) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: systemImage)
-                .foregroundColor(.secondary)
-                .frame(width: 18)
-            Text(label)
-                .foregroundColor(.secondary)
-            Spacer()
-            Text(value)
-                .fontWeight(.medium)
-                .multilineTextAlignment(.trailing)
+    private var statusPills: some View {
+        HStack(spacing: 6) {
+            ForEach(pills) { pill in
+                HStack(spacing: 4) {
+                    Image(systemName: pill.systemImage).font(.caption2)
+                    Text(pill.text).font(.caption).lineLimit(1)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(pill.color.opacity(0.15))
+                .foregroundColor(pill.color == .secondary ? .secondary : pill.color)
+                .clipShape(Capsule())
+            }
+            Spacer(minLength: 0)
         }
-        .font(.callout)
     }
 
     // MARK: - Settings
