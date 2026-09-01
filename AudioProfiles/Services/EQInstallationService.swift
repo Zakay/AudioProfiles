@@ -53,6 +53,21 @@ final class EQInstallationService: ObservableObject {
         refreshInstallState()
         NSLog("[EQ-DIAG] EQInstallationService.init() installState=\(installState)")
         startMonitoringDeviceChanges()
+        scheduleInstallStateRetriesIfNeeded()
+    }
+
+    /// After app launch (or a coreaudiod restart) the HAL plugin can take a moment to register,
+    /// so an init-time check may see `.notLoaded`. Retry a few times with backoff so `isInstalled`
+    /// reliably becomes true without depending on an incidental device-change event. This matters
+    /// for always-on processing, which must engage as soon as the driver is ready.
+    private func scheduleInstallStateRetriesIfNeeded() {
+        guard installState != .installed else { return }
+        for delay in [0.5, 1.0, 2.0, 4.0, 8.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self, self.installState != .installed, self.installState != .installing else { return }
+                self.refreshInstallState()
+            }
+        }
     }
 
     /// Subscribe to CoreAudio device-list changes so we reactively detect

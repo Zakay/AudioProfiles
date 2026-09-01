@@ -107,6 +107,21 @@ class ProfileManager: ObservableObject {
             .sink { [weak self] in self?.evaluateAndApply() }
             .store(in: &cancellables)
 
+        // Re-evaluate when the EQ driver becomes installed/loaded. At launch (or after a
+        // coreaudiod restart) the HAL plugin may not be resolvable yet, so an early evaluation
+        // sees needsVirtualDriver == false and stays on the native path. Once the driver is
+        // ready, engage always-on processing without waiting for an unrelated event.
+        EQInstallationService.shared.$installState
+            .map { $0 == .installed }
+            .removeDuplicates()
+            .sink { [weak self] installed in
+                if installed {
+                    self?.lastFingerprint = nil
+                    self?.evaluateAndApply()
+                }
+            }
+            .store(in: &cancellables)
+
         // Restore persisted manual switch timestamp (survives force-quit)
         if let ts = UserDefaults.standard.object(forKey: "lastManualSwitchTimestamp") as? Double {
             lastManualSwitchTimestamp = Date(timeIntervalSince1970: ts)
@@ -159,6 +174,13 @@ class ProfileManager: ObservableObject {
                             self.activateProfile(with: self.profiles.first!.id)
                         }
                     }
+
+                    // Always run a full evaluation at launch. Trigger detection may resolve to the
+                    // already-active profile (e.g. System Default with no matching trigger), in
+                    // which case no activation path calls evaluateAndApply — so always-on
+                    // processing would never engage. This guarantees the pipeline is realized.
+                    self.lastFingerprint = nil
+                    self.evaluateAndApply()
                 }
                 .store(in: &self.cancellables)
         }
