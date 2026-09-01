@@ -62,7 +62,23 @@ class ProfileManager: ObservableObject {
         isProcessingBypassed = bypassed
         UserDefaults.standard.set(bypassed, forKey: "com.audioprofiles.processingBypassed")
         evaluateAndApply()
+        // The master switch also gates automatic profile switching, so re-run detection when
+        // it turns back on (a device may have changed while the app was passive).
+        if !bypassed { ProfileTriggerService.shared.triggerAutoDetection() }
     }
+
+    /// User preference: keep the virtual driver engaged even when the EQ is flat, so content-mode
+    /// changes are seamless (no device switch, no glitch). When off, the driver only engages when
+    /// there is actually something to apply (non-flat EQ or an active content overlay).
+    @Published private(set) var alwaysOnProcessing: Bool = true
+
+    func setAlwaysOnProcessing(_ enabled: Bool) {
+        alwaysOnProcessing = enabled
+        UserDefaults.standard.set(enabled, forKey: "com.audioprofiles.alwaysOnProcessing")
+        lastFingerprint = nil
+        evaluateAndApply()
+    }
+
     @Published private(set) var isAutoSwitchingDisabled: Bool = false
 
     // Timestamp-based manual override tracking — persisted so force-quit doesn't lose it
@@ -129,6 +145,12 @@ class ProfileManager: ObservableObject {
 
         // Restore persisted processing bypass state
         isProcessingBypassed = UserDefaults.standard.bool(forKey: "com.audioprofiles.processingBypassed")
+
+        // Restore always-on preference (default true — keep the pipeline engaged for seamless
+        // content-mode changes). Only override the default when the user has explicitly set it.
+        if UserDefaults.standard.object(forKey: "com.audioprofiles.alwaysOnProcessing") != nil {
+            alwaysOnProcessing = UserDefaults.standard.bool(forKey: "com.audioprofiles.alwaysOnProcessing")
+        }
 
         // Load profiles from UserDefaults (no Core Audio calls — safe during init)
         loadProfiles()
@@ -354,15 +376,15 @@ class ProfileManager: ObservableObject {
         }
 
         // 7. Determine if virtual driver is needed.
-        // While Sound Modes (auto content modes) is enabled, keep the pipeline engaged even
-        // when the EQ is currently flat. Content-mode changes then become in-place EQ updates
-        // on the already-running pipeline (seamless) instead of switching the system's default
-        // output device between native and virtual on every change — which caused an audible
-        // glitch and virtual-device appear/disappear churn. The master EQ toggle
-        // (isProcessingBypassed) still fully disengages to the native path.
+        // With the "Always-on processing" preference on, keep the pipeline engaged even when the
+        // EQ is currently flat. Content-mode changes then become in-place EQ updates on the
+        // already-running pipeline (seamless) instead of switching the system's default output
+        // device between native and virtual on every change — which caused an audible glitch and
+        // virtual-device appear/disappear churn. The master switch (isProcessingBypassed) still
+        // fully disengages to the native path.
         let installed = EQInstallationService.shared.isInstalled
-        let keepEngagedForAutoModes = SoundModesStore.shared.isEnabled && !isProcessingBypassed
-        let needsVirtualDriver = installed && (!effectiveEQ.isFlat || keepEngagedForAutoModes)
+        let keepEngaged = alwaysOnProcessing && !isProcessingBypassed
+        let needsVirtualDriver = installed && (!effectiveEQ.isFlat || keepEngaged)
 
         // 8. Fingerprint check — skip if unchanged
         let fingerprint = PipelineFingerprint(

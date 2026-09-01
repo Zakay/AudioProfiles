@@ -229,6 +229,11 @@ class ProfileTriggerService {
     private func evaluateTriggers(devices: [AudioDevice], isManualTrigger: Bool) {
         // Skip automatic triggers if intentionally disabled
         if !isManualTrigger {
+            // Master switch off — the app is passive: no processing and no auto-switching.
+            if ProfileManager.shared.isProcessingBypassed {
+                AppLogger.info("Ignoring device change - app is disabled via the master switch")
+                return
+            }
             // Check for intentional auto-switching disable (user chose to disable)
             if ProfileManager.shared.isAutoSwitchingDisabled {
                 AppLogger.info("Ignoring device change - auto-switching is intentionally disabled")

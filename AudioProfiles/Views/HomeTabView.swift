@@ -38,8 +38,8 @@ struct HomeTabView: View {
                     .font(.title2)
                     .fontWeight(.semibold)
                 Text(processingOn
-                     ? "Audio processing is on"
-                     : "Bypassed — audio goes straight to the hardware output")
+                     ? "Profiles, EQ & content modes active"
+                     : "Off — audio untouched, no auto-switching")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -178,6 +178,18 @@ struct HomeTabView: View {
             }
 
             Toggle("Show notification when profile switches", isOn: $showNotifications)
+
+            if installService.isInstalled {
+                VStack(alignment: .leading, spacing: 2) {
+                    Toggle("Always-on processing", isOn: Binding(
+                        get: { profileManager.alwaysOnProcessing },
+                        set: { profileManager.setAlwaysOnProcessing($0) }
+                    ))
+                    Text("Keeps the audio driver engaged so content-mode changes are seamless (no device switch, no glitch). Turn off to stay on the hardware output until EQ or a mode is active.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
