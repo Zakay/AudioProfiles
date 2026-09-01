@@ -16,65 +16,47 @@ struct HomeTabView: View {
     @AppStorage("showAutoSwitchNotifications") private var showNotifications = true
 
     var body: some View {
-        VStack(spacing: 14) {
-            masterCard
-            eqPreviewCard
+        VStack(alignment: .leading, spacing: 16) {
+            header
+            eqPreview
             statusPills
-            settingsCard
+            settingsSection
         }
         .padding(.horizontal)
         .padding(.bottom)
         .padding(.top, 8)
     }
 
-    // MARK: - Master Processing
+    // MARK: - Header (matches the other tabs' style)
 
     private var processingOn: Bool { !profileManager.isProcessingBypassed }
 
-    @ViewBuilder
-    private var masterCard: some View {
-        if installService.isInstalled {
-            Button {
-                profileManager.setProcessingBypassed(processingOn)
-            } label: {
-                HStack(spacing: 12) {
-                    Image(systemName: processingOn ? "waveform" : "waveform.slash")
-                        .font(.title2)
-                        .foregroundColor(processingOn ? .accentColor : .secondary)
-                        .frame(width: 28)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Audio Processing")
-                            .font(.title3)
-                            .fontWeight(.semibold)
-                        Text(processingOn
-                             ? "On · EQ and sound modes are active"
-                             : "Off · audio goes straight to the hardware output")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    Spacer()
-                    AccentSwitch(isOn: processingOn)
-                }
-                .contentShape(Rectangle())
+    private var header: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Home")
+                    .font(.title2)
+                    .fontWeight(.semibold)
+                Text(processingOn
+                     ? "Audio processing is on"
+                     : "Bypassed — audio goes straight to the hardware output")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
-            .buttonStyle(.plain)
-            .padding()
-            .background(Color(NSColor.controlBackgroundColor))
-            .cornerRadius(12)
-        } else {
-            HStack(spacing: 10) {
-                Image(systemName: "waveform.path.ecg.rectangle").foregroundColor(.secondary)
-                Text("Install the audio component (EQ tab) to enable processing.")
-                    .font(.caption).foregroundColor(.secondary)
-                Spacer()
+            Spacer()
+            if installService.isInstalled {
+                Toggle("", isOn: Binding(
+                    get: { processingOn },
+                    set: { on in profileManager.setProcessingBypassed(!on) }
+                ))
+                .toggleStyle(.switch)
+                .labelsHidden()
+                .help("Turn off to bypass the app and send audio straight to the hardware output")
             }
-            .padding()
-            .background(Color(NSColor.controlBackgroundColor))
-            .cornerRadius(12)
         }
     }
 
-    // MARK: - EQ preview
+    // MARK: - EQ preview (non-interactive, always visible)
 
     private var activeOutputUID: String? {
         profileManager.activeOutputDeviceUID ?? engine.targetDeviceUID
@@ -92,7 +74,7 @@ struct HomeTabView: View {
     }
 
     @ViewBuilder
-    private var eqPreviewCard: some View {
+    private var eqPreview: some View {
         if installService.isInstalled {
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
@@ -102,9 +84,13 @@ struct HomeTabView: View {
                     Text(curveIsFlat ? "No EQ on this device — add one in the EQ tab" : "Editing in EQ tab")
                         .font(.caption2).foregroundColor(.secondary)
                 }
+
+                // Read-only mirror of the EQ tab graph for the active output: shows the base EQ
+                // plus any active content-mode overlay, and the same built-in live L/R level
+                // meter (visible while audio is routed). Reads the same EQStore / SoundModes
+                // state as the EQ tab (single source of truth), so it stays correct as modes are
+                // enabled/disabled. No height override — the graph has its own intrinsic height.
                 if let uid = activeOutputUID {
-                    // Read-only preview of the current curve for the active output, including any
-                    // active content-mode overlay. Editing happens in the EQ tab.
                     InteractiveEQGraphView(
                         settings: eqStore.settings(for: uid),
                         selectedBand: .constant(nil),
@@ -112,19 +98,14 @@ struct HomeTabView: View {
                         contentOverlay: activeOverlay,
                         onChange: { _ in }
                     )
-                    .frame(height: 150)
                     .allowsHitTesting(false)
                     .opacity(profileManager.isProcessingBypassed ? 0.4 : 1)
                 } else {
                     Text("Waiting for an audio output…")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .frame(maxWidth: .infinity, minHeight: 150)
+                        .font(.caption).foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity, minHeight: 220)
                 }
             }
-            .padding()
-            .background(Color(NSColor.controlBackgroundColor))
-            .cornerRadius(12)
         }
     }
 
@@ -146,7 +127,6 @@ struct HomeTabView: View {
         result.append(Pill(text: isPublic ? "Public" : "Private",
                            systemImage: isPublic ? "speaker.wave.2" : "headphones",
                            color: isPublic ? .blue : .purple))
-
         if soundModes.isEnabled, soundModes.activeContentMode != .none {
             result.append(Pill(text: soundModes.activeContentMode.displayName,
                                systemImage: "waveform", color: .green))
@@ -179,7 +159,7 @@ struct HomeTabView: View {
 
     // MARK: - Settings
 
-    private var settingsCard: some View {
+    private var settingsSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Settings").font(.headline)
 
@@ -200,9 +180,6 @@ struct HomeTabView: View {
             Toggle("Show notification when profile switches", isOn: $showNotifications)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding()
-        .background(Color(NSColor.controlBackgroundColor))
-        .cornerRadius(12)
     }
 
     @available(macOS 13.0, *)
