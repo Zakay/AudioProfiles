@@ -577,9 +577,13 @@ final class EQEngineService: ObservableObject {
 
         AppLogger.info("EQEngineService: switching device → '\(virtualDeviceName)' real=\(realDeviceUID)")
 
-        // 1. Restore the complete user-visible state to the old hardware before
-        // disconnecting its AUHAL. If this cannot be verified, keep the working route.
-        if let vID = virtualDeviceID, let rID = realDeviceID {
+        // 1. Restore the complete user-visible state to the old hardware before disconnecting
+        // its AUHAL — but only if that hardware is still connected. If it disconnected (e.g.
+        // Bluetooth headphones dropped while backing the virtual driver), there is nothing to
+        // restore to, so skip the handoff and proceed with the switch rather than refusing
+        // (which would strand us on the dead device).
+        let oldStillConnected = targetDeviceUID.flatMap { translateUID($0) } != nil
+        if oldStillConnected, let vID = virtualDeviceID, let rID = realDeviceID {
             guard let virtualState = outputStateService.readRequiredVirtualState(from: vID) else {
                 AppLogger.error("EQEngineService: refusing device switch because virtual state could not be read")
                 return

@@ -332,21 +332,24 @@ class ProfileManager: ObservableObject {
         if resolvedOutputDevice == nil {
             var currentDevice = pipelineService.getDefaultOutputDevice()
             if let dev = currentDevice, EQDriverService.shared.isOurVirtualDevice(dev.id) {
+                // Look through the virtual device to the real device it currently backs.
                 if EQEngineService.shared.isRunning, let realUID = EQEngineService.shared.targetDeviceUID {
                     currentDevice = devices.first { $0.id == realUID && $0.isOutput }
                 } else {
-                    // Orphan: resolve the previously represented physical
-                    // endpoint. The pipeline service will transfer state before
-                    // selecting it and only then hide the virtual driver.
+                    currentDevice = nil
+                }
+                // If the backing device is gone (e.g. Bluetooth headphones disconnected while we
+                // route through the virtual driver — macOS keeps the virtual device as default,
+                // so nothing else re-points us) or EQ isn't running, fall back to a real connected
+                // output: the previously represented endpoint if still present, else any output.
+                if currentDevice == nil {
                     if let savedUID = EQRouteRecoveryStore.representedDeviceUID {
                         currentDevice = devices.first {
                             $0.id == savedUID && $0.isOutput &&
                             !EQDriverService.shared.isOurVirtualDevice($0.id)
                         }
                     }
-                    if currentDevice == nil || currentDevice.map({
-                        EQDriverService.shared.isOurVirtualDevice($0.id)
-                    }) == true {
+                    if currentDevice == nil {
                         currentDevice = devices.first {
                             $0.isOutput && !EQDriverService.shared.isOurVirtualDevice($0.id)
                         }
