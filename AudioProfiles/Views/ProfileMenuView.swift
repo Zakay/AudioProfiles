@@ -1,9 +1,8 @@
 import SwiftUI
 
-/// Main menu bar popover — profile list, mode toggle, status indicators, quick actions.
+/// Main menu bar popover — current status, global controls, quick profile switch, and actions.
 ///
 /// Sub-components live in their own files:
-/// - AudioStatusIndicators.swift
 /// - EQQuickAccessRow.swift
 /// - ContentModesRow.swift
 struct ProfileMenuView: View {
@@ -13,50 +12,100 @@ struct ProfileMenuView: View {
     @ObservedObject private var installService = EQInstallationService.shared
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            profileHeader
-            masterProcessingRow
-            currentDevicesSection
-            triggerEventRow
-            AudioStatusIndicators()
+        VStack(alignment: .leading, spacing: 6) {
+            statusHeader
 
             Divider()
 
-            profileList
+            masterProcessingRow
             autoSwitchRow
-
             EQQuickAccessRow()
             ContentModesRow()
 
+            if hasUserProfiles {
+                Divider()
+                profileSwitcher
+            }
+
             Divider()
 
-            Button("Configure") {
+            Button("Configure…") {
                 dismissPopover()
                 WindowManager.shared.openConfigurationWindow()
             }
             .buttonStyle(MenuRowButtonStyle())
 
-            Divider()
-
             Button("About") { openAboutWindow() }
                 .buttonStyle(MenuRowButtonStyle())
-
-            Divider()
 
             Button("Quit") { NSApp.terminate(nil) }
                 .keyboardShortcut("q")
                 .buttonStyle(MenuRowButtonStyle())
         }
         .padding(12)
-        .frame(minWidth: 220)
+        .frame(minWidth: 250)
+    }
+
+    // MARK: - Status Header
+
+    private var statusHeader: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Image(systemName: currentProfileIcon)
+                    .foregroundColor(isSystemDefaultActive ? .secondary
+                                     : (profileManager.activeMode == .public ? .blue : .purple))
+                    .frame(width: 20)
+                Text(profileManager.activeProfile?.name ?? viewModel.title)
+                    .font(.headline)
+                    .lineLimit(1)
+                Spacer()
+                if activeProfileHasModes { modeToggle }
+            }
+
+            if let output = profileManager.activeOutputDeviceName {
+                deviceRow(icon: "speaker.wave.2", name: output)
+            }
+            if let input = profileManager.activeInputDeviceName {
+                deviceRow(icon: "mic", name: input)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.top, 2)
+    }
+
+    /// Public/Private switch — only meaningful when the active profile is configured with
+    /// different device priorities for the two modes.
+    private var modeToggle: some View {
+        Button(action: { ProfileManager.shared.toggleMode() }) {
+            HStack(spacing: 4) {
+                Image(systemName: profileManager.activeMode.iconName).font(.caption2)
+                Text(profileManager.activeMode.displayName).font(.caption).fontWeight(.medium)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background((profileManager.activeMode == .public ? Color.blue : Color.purple).opacity(0.18))
+            .foregroundColor(profileManager.activeMode == .public ? .blue : .purple)
+            .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .help("Switch to \(profileManager.activeMode == .public ? ProfileMode.private.displayName : ProfileMode.public.displayName) mode")
+    }
+
+    private func deviceRow(icon: String, name: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon)
+                .foregroundColor(.secondary)
+                .font(.caption)
+                .frame(width: 20)
+            Text(name).font(.caption).foregroundColor(.secondary).lineLimit(1)
+        }
     }
 
     // MARK: - Master Processing Toggle
 
-    /// Master switch: when off, the app leaves the audio path entirely and audio goes to the
-    /// hardware output directly (no EQ, no virtual driver). Bound to the same processing-bypass
-    /// state as the EQ tab and EQ quick-access row. Only shown when the driver is installed —
-    /// without it there is no processing to disable.
+    /// Master switch: when off, the app is passive — audio goes straight to the hardware output
+    /// (no EQ, no content modes) and profile auto-switching is paused. Shown only when the driver
+    /// is installed.
     @ViewBuilder
     private var masterProcessingRow: some View {
         if installService.isInstalled {
@@ -69,119 +118,13 @@ struct ProfileMenuView: View {
                         .foregroundColor(on ? .accentColor : .secondary)
                         .frame(width: 16, height: 16)
                         .frame(width: 24)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("Audio Processing")
-                        Text(on ? "On · EQ & sound modes active" : "Off · using hardware output")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
+                    Text("Audio Processing")
                     Spacer()
                     AccentSwitch(isOn: on)
                 }
             }
             .buttonStyle(MenuRowButtonStyle())
-            .help("Turn off to bypass the app and send audio straight to the hardware output")
-        }
-    }
-
-    // MARK: - Header
-
-    private var profileHeader: some View {
-        HStack {
-            Image(systemName: currentProfileIcon)
-                .foregroundColor(isSystemDefaultActive ? .primary : (profileManager.activeMode == .public ? .blue : .purple))
-                .frame(width: 20, height: 20)
-                .frame(width: 24)
-
-            VStack(alignment: .leading) {
-                Text(viewModel.title).font(.headline)
-            }
-
-            Spacer()
-
-            if !isSystemDefaultActive {
-                Button(action: { ProfileManager.shared.toggleMode() }) {
-                    HStack(spacing: 4) {
-                        Image(systemName: profileManager.activeMode.iconName).font(.caption)
-                        Text(profileManager.activeMode.displayName).font(.caption).fontWeight(.medium)
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(profileManager.activeMode == .public ? Color.blue.opacity(0.2) : Color.purple.opacity(0.2))
-                    .foregroundColor(profileManager.activeMode == .public ? .blue : .purple)
-                    .cornerRadius(6)
-                }
-                .buttonStyle(.plain)
-                .help("Switch to \(profileManager.activeMode == .public ? ProfileMode.private.displayName : ProfileMode.public.displayName) mode")
-            }
-        }
-        .padding(.horizontal, 12)
-    }
-
-    // MARK: - Current Devices
-
-    private var currentDevicesSection: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            if let outputDevice = profileManager.activeOutputDeviceName {
-                deviceRow(icon: "speaker.wave.2", name: outputDevice)
-            }
-            if let inputDevice = profileManager.activeInputDeviceName {
-                deviceRow(icon: "mic", name: inputDevice)
-            }
-        }
-        .padding(.horizontal, 12)
-    }
-
-    private func deviceRow(icon: String, name: String) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: icon)
-                .foregroundColor(.secondary)
-                .font(.caption)
-                .frame(width: 16, height: 16)
-                .frame(width: 24)
-            Text(name).font(.caption).foregroundColor(.secondary)
-        }
-    }
-
-    // MARK: - Trigger Event Row
-
-    @ViewBuilder
-    private var triggerEventRow: some View {
-        if let event = profileManager.lastTriggerEvent {
-            HStack(spacing: 4) {
-                Image(systemName: event.wasAutomatic ? "bolt.fill" : "hand.tap.fill")
-                    .font(.system(size: 9))
-                    .foregroundColor(.secondary)
-                Text("\(event.timeAgo) · \(event.triggerDeviceName)")
-                    .font(.caption2)
-                    .foregroundColor(.secondary.opacity(0.7))
-            }
-            .padding(.horizontal, 12)
-        }
-    }
-
-    // MARK: - Profile List
-
-    @ViewBuilder
-    private var profileList: some View {
-        if profileManager.profiles.isEmpty {
-            Text("No profiles configured")
-                .foregroundColor(.secondary)
-                .font(.caption)
-        } else {
-            ForEach(profileManager.profiles) { profile in
-                Button(action: { ProfileManager.shared.activateProfile(with: profile.id, isManual: true) }) {
-                    HStack {
-                        Image(systemName: profile.iconName).frame(width: 16, height: 16).frame(width: 24)
-                        Text(profile.name)
-                        Spacer()
-                        if profileManager.activeProfile?.id == profile.id {
-                            Image(systemName: "checkmark").foregroundColor(Color.accentColor)
-                        }
-                    }
-                }
-                .buttonStyle(MenuRowButtonStyle())
-            }
+            .help("Turn off to bypass the app: audio goes to the hardware output and auto-switching pauses")
         }
     }
 
@@ -200,7 +143,7 @@ struct ProfileMenuView: View {
                     .foregroundColor(profileManager.isAutoSwitchingDisabled ? .secondary : .accentColor)
                     .frame(width: 16, height: 16)
                     .frame(width: 24)
-                Text("Profiles")
+                Text("Auto-switch Profiles")
                 Spacer()
                 Text(profileManager.isAutoSwitchingDisabled ? "Off" : "On")
                     .font(.caption)
@@ -208,6 +151,25 @@ struct ProfileMenuView: View {
             }
         }
         .buttonStyle(MenuRowButtonStyle())
+    }
+
+    // MARK: - Profile Switcher (manual)
+
+    @ViewBuilder
+    private var profileSwitcher: some View {
+        ForEach(profileManager.profiles) { profile in
+            Button(action: { ProfileManager.shared.activateProfile(with: profile.id, isManual: true) }) {
+                HStack {
+                    Image(systemName: profile.iconName).frame(width: 16, height: 16).frame(width: 24)
+                    Text(profile.name).lineLimit(1)
+                    Spacer()
+                    if profileManager.activeProfile?.id == profile.id {
+                        Image(systemName: "checkmark").foregroundColor(.accentColor)
+                    }
+                }
+            }
+            .buttonStyle(MenuRowButtonStyle())
+        }
     }
 
     // MARK: - Helpers
@@ -218,6 +180,18 @@ struct ProfileMenuView: View {
 
     private var isSystemDefaultActive: Bool {
         profileManager.activeProfile?.isSystemDefault ?? false
+    }
+
+    private var hasUserProfiles: Bool {
+        profileManager.profiles.contains { !$0.isSystemDefault }
+    }
+
+    /// True when the active profile has different device priorities for Public vs Private,
+    /// so switching mode actually changes something.
+    private var activeProfileHasModes: Bool {
+        guard let p = profileManager.activeProfile, !p.isSystemDefault else { return false }
+        return p.publicOutputPriority != p.privateOutputPriority
+            || p.publicInputPriority != p.privateInputPriority
     }
 
     private func openAboutWindow() {
