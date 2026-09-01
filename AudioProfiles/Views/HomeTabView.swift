@@ -163,6 +163,13 @@ struct HomeTabView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Settings").font(.headline)
 
+            if installService.isInstalled {
+                Toggle("Always-on processing", isOn: Binding(
+                    get: { profileManager.alwaysOnProcessing },
+                    set: { profileManager.setAlwaysOnProcessing($0) }
+                ))
+            }
+
             if #available(macOS 13.0, *) {
                 Toggle("Launch at Login", isOn: Binding(
                     get: { launchAtLogin },
@@ -178,18 +185,6 @@ struct HomeTabView: View {
             }
 
             Toggle("Show notification when profile switches", isOn: $showNotifications)
-
-            if installService.isInstalled {
-                VStack(alignment: .leading, spacing: 2) {
-                    Toggle("Always-on processing", isOn: Binding(
-                        get: { profileManager.alwaysOnProcessing },
-                        set: { profileManager.setAlwaysOnProcessing($0) }
-                    ))
-                    Text("Keeps the audio driver engaged so content-mode changes are seamless (no device switch, no glitch). Turn off to stay on the hardware output until EQ or a mode is active.")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                }
-            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
