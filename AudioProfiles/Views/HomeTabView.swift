@@ -170,6 +170,8 @@ struct HomeTabView: View {
                 ))
             }
 
+            Toggle("Show notification when profile switches", isOn: $showNotifications)
+
             if #available(macOS 13.0, *) {
                 Toggle("Launch at Login", isOn: Binding(
                     get: { launchAtLogin },
@@ -183,8 +185,6 @@ struct HomeTabView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
-
-            Toggle("Show notification when profile switches", isOn: $showNotifications)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
