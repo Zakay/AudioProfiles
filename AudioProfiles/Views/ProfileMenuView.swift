@@ -76,20 +76,7 @@ struct ProfileMenuView: View {
                             .foregroundColor(.secondary)
                     }
                     Spacer()
-                    // Custom switch drawn from shapes rather than a system Toggle: a system
-                    // .switch renders in the inactive (grey) appearance while the menu-bar
-                    // popover window isn't key, so it looked grey-when-on until toggled. Shape
-                    // fills aren't subject to that control dimming, so this stays accent-colored.
-                    Capsule()
-                        .fill(on ? Color.accentColor : Color.secondary.opacity(0.35))
-                        .frame(width: 32, height: 18)
-                        .overlay(
-                            Circle()
-                                .fill(Color.white)
-                                .frame(width: 14, height: 14)
-                                .offset(x: on ? 7 : -7)
-                        )
-                        .animation(.easeInOut(duration: 0.15), value: on)
+                    AccentSwitch(isOn: on)
                 }
             }
             .buttonStyle(MenuRowButtonStyle())

@@ -14,6 +14,9 @@ struct ConfigurationView: View {
 
     var body: some View {
         TabView {
+            HomeTabView()
+                .tabItem { Label("Home", systemImage: "house") }
+
             ProfilesTabView(
                 profileManager: profileManager,
                 showAddProfileSheet: $showAddProfileSheet,

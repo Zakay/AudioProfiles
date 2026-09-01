@@ -1,13 +1,10 @@
 import SwiftUI
-import ServiceManagement
 
-/// The Profiles tab content — profile list, auto-switch toggle, and settings.
+/// The Profiles tab content — profile list and the auto-switch toggle.
 /// Extracted from ConfigurationView to keep each tab in its own file.
 struct ProfilesTabView: View {
 
     @ObservedObject var profileManager: ProfileManager
-    @AppStorage("launchAtLogin") private var launchAtLogin = false
-    @AppStorage("showAutoSwitchNotifications") private var showNotifications = true
 
     /// Passed from ConfigurationView so sheets/alerts live at the right level.
     @Binding var showAddProfileSheet: Bool
@@ -19,7 +16,6 @@ struct ProfilesTabView: View {
     var body: some View {
         VStack(spacing: 16) {
             profileListSection
-            settingsSection
         }
         .padding(.horizontal)
         .padding(.bottom)
@@ -96,51 +92,6 @@ struct ProfilesTabView: View {
         .frame(height: min(CGFloat(profileManager.profiles.count) * 80, 400))
     }
 
-    // MARK: - Settings Section
-
-    private var settingsSection: some View {
-        VStack(spacing: 12) {
-            HStack {
-                Text("Settings").font(.headline)
-                Spacer()
-            }
-
-            HStack {
-                if #available(macOS 13.0, *) {
-                    Toggle("Launch at Login", isOn: Binding(
-                        get: { launchAtLogin },
-                        set: { newValue in
-                            launchAtLogin = newValue
-                            setLaunchAtLogin(enabled: newValue)
-                        }
-                    ))
-                } else {
-                    Text("Launch at Login requires macOS 13.0+")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                Spacer()
-            }
-
-            HStack {
-                Toggle("Show notification when profile switches", isOn: $showNotifications)
-                Spacer()
-            }
-        }
-        .padding()
-        .background(Color(NSColor.controlBackgroundColor))
-        .cornerRadius(12)
-    }
-
-    @available(macOS 13.0, *)
-    private func setLaunchAtLogin(enabled: Bool) {
-        do {
-            if enabled { try SMAppService.mainApp.register() }
-            else { try SMAppService.mainApp.unregister() }
-        } catch {
-            AppLogger.error("Failed to \(enabled ? "enable" : "disable") launch at login: \(error.localizedDescription)")
-        }
-    }
 }
 
 // MARK: - Profile List Row
