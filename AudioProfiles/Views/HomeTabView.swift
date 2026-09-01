@@ -80,30 +80,47 @@ struct HomeTabView: View {
         profileManager.activeOutputDeviceUID ?? engine.targetDeviceUID
     }
 
+    private var activeOverlay: EQSettings? {
+        (soundModes.isEnabled && !profileManager.isProcessingBypassed) ? soundModes.activeOverlay() : nil
+    }
+
+    private var curveIsFlat: Bool {
+        guard let uid = activeOutputUID else { return true }
+        let baseFlat = eqStore.settings(for: uid).isFlat || profileManager.isProcessingBypassed
+        let overlayFlat = activeOverlay?.isFlat ?? true
+        return baseFlat && overlayFlat
+    }
+
     @ViewBuilder
     private var eqPreviewCard: some View {
-        if installService.isInstalled, let uid = activeOutputUID {
+        if installService.isInstalled {
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     Text(profileManager.activeOutputDeviceName ?? "Output")
                         .font(.subheadline).fontWeight(.medium)
                     Spacer()
-                    Text("Edit in EQ tab")
+                    Text(curveIsFlat ? "No EQ on this device — add one in the EQ tab" : "Editing in EQ tab")
                         .font(.caption2).foregroundColor(.secondary)
                 }
-                // Read-only preview of the current curve for the active output, including any
-                // active content-mode overlay. Editing happens in the EQ tab.
-                InteractiveEQGraphView(
-                    settings: eqStore.settings(for: uid),
-                    selectedBand: .constant(nil),
-                    frequencyResponse: nil,
-                    contentOverlay: (soundModes.isEnabled && !profileManager.isProcessingBypassed)
-                        ? soundModes.activeOverlay() : nil,
-                    onChange: { _ in }
-                )
-                .frame(height: 150)
-                .allowsHitTesting(false)
-                .opacity(profileManager.isProcessingBypassed ? 0.4 : 1)
+                if let uid = activeOutputUID {
+                    // Read-only preview of the current curve for the active output, including any
+                    // active content-mode overlay. Editing happens in the EQ tab.
+                    InteractiveEQGraphView(
+                        settings: eqStore.settings(for: uid),
+                        selectedBand: .constant(nil),
+                        frequencyResponse: nil,
+                        contentOverlay: activeOverlay,
+                        onChange: { _ in }
+                    )
+                    .frame(height: 150)
+                    .allowsHitTesting(false)
+                    .opacity(profileManager.isProcessingBypassed ? 0.4 : 1)
+                } else {
+                    Text("Waiting for an audio output…")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity, minHeight: 150)
+                }
             }
             .padding()
             .background(Color(NSColor.controlBackgroundColor))
