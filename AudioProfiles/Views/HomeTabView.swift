@@ -81,8 +81,10 @@ struct HomeTabView: View {
                     Text(profileManager.activeOutputDeviceName ?? "Output")
                         .font(.subheadline).fontWeight(.medium)
                     Spacer()
-                    Text(curveIsFlat ? "No EQ on this device — add one in the EQ tab" : "Editing in EQ tab")
-                        .font(.caption2).foregroundColor(.secondary)
+                    if !curveIsFlat {
+                        Text("Editing in EQ tab")
+                            .font(.caption2).foregroundColor(.secondary)
+                    }
                 }
 
                 // Read-only mirror of the EQ tab graph for the active output: shows the base EQ
