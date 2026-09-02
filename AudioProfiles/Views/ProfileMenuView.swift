@@ -139,8 +139,10 @@ struct ProfileMenuView: View {
         let dimmed = subordinate && profileManager.isProcessingBypassed
         return Button(action: action) {
             HStack(spacing: 0) {
+                // Constant color: the AccentSwitch is the sole state indicator, so flipping a
+                // toggle animates only the switch instead of snapping the whole row's icon color.
                 Image(systemName: icon)
-                    .foregroundColor(isOn && !dimmed ? .accentColor : .secondary)
+                    .foregroundColor(.secondary)
                     .frame(width: 16, height: 16)
                     .frame(width: 24)
                 Text(title)
