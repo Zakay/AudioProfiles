@@ -274,15 +274,13 @@ struct StatusItemView: View {
         .frame(height: 22)
     }
 
+    // The menu bar icon reflects the active profile's mode only. Auto-switch on/off is a
+    // popover control and must not recolor the menu bar icon.
     private var backgroundColor: Color {
-        if isDisabled {
-            return Color.secondary.opacity(0.3)
-        } else {
-            return mode == .public ? Color.blue : Color.purple
-        }
+        mode == .public ? Color.blue : Color.purple
     }
 
     private var iconColor: Color {
-        isDisabled ? .secondary : .white
+        .white
     }
 }
