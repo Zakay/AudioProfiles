@@ -250,7 +250,7 @@ struct StatusItemView: View {
     var contentMode: ContentModeType? = nil
 
     var body: some View {
-        HStack(spacing: 3) {
+        HStack(spacing: 4) {
             ZStack {
                 RoundedRectangle(cornerRadius: 4)
                     .fill(backgroundColor)
@@ -261,14 +261,18 @@ struct StatusItemView: View {
                     .font(.system(size: 12, weight: .medium))
             }
 
-            // Show mode icon + name when content mode is active (not .none)
+            // Active content mode gets its own box, styled like the main icon (not bare text).
             if let contentMode = contentMode, contentMode != .none {
-                Image(systemName: contentMode.iconName)
-                    .foregroundColor(.primary.opacity(0.7))
-                    .font(.system(size: 9, weight: .medium))
-                Text(contentMode.displayName)
-                    .foregroundColor(.primary.opacity(0.7))
-                    .font(.system(size: 10, weight: .medium))
+                HStack(spacing: 3) {
+                    Image(systemName: contentMode.iconName)
+                        .font(.system(size: 9, weight: .medium))
+                    Text(contentMode.displayName)
+                        .font(.system(size: 10, weight: .medium))
+                }
+                .foregroundColor(.white)
+                .padding(.horizontal, 5)
+                .frame(height: 18)
+                .background(RoundedRectangle(cornerRadius: 4).fill(Color.green))
             }
         }
         .frame(height: 22)
