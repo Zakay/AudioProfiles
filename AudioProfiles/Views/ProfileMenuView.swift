@@ -67,7 +67,9 @@ struct ProfileMenuView: View {
                 .buttonStyle(MenuRowButtonStyle())
         }
         .padding(12)
-        .frame(minWidth: 250)
+        // Fixed width so the popover doesn't resize (and reflow/re-wrap every other row) as
+        // toggles flip and rows show/hide. Long names truncate instead of widening the menu.
+        .frame(width: 280)
     }
 
     // MARK: - Status Header
