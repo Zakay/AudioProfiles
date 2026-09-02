@@ -6,7 +6,8 @@ private func menuRowIcon(_ name: String, color: Color = .secondary) -> some View
     Image(systemName: name)
         .font(.system(size: 14))
         .foregroundColor(color)
-        .frame(width: 24, alignment: .center)
+        .frame(width: 22, alignment: .center)
+        .padding(.trailing, 8)   // gap between icon and label
 }
 
 /// Main menu bar popover — current status, a uniform set of feature toggles, quick profile
@@ -67,7 +68,7 @@ struct ProfileMenuView: View {
                 WindowManager.shared.openConfigurationWindow()
             }
             menuActionRow(icon: "info.circle", title: "About") { openAboutWindow() }
-            menuActionRow(icon: "power", title: "Quit") { NSApp.terminate(nil) }
+            menuActionRow(icon: "xmark.circle", title: "Quit") { NSApp.terminate(nil) }
         }
         .padding(12)
         // Fixed width so the popover doesn't resize (and reflow/re-wrap every other row) as
