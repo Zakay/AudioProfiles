@@ -148,12 +148,11 @@ struct ProfileMenuView: View {
 
     // MARK: - Profile Switcher (manual)
 
-    /// Profiles worth offering for manual selection: trigger-less profiles (which have no
-    /// automatic activation path) plus System Default. Trigger profiles are managed by device
-    /// detection, so they're intentionally not listed here. This list is independent of the
-    /// auto-switch toggle so flipping that switch doesn't reflow the menu.
+    /// All profiles are manually selectable. The list is constant (it only changes when profiles
+    /// are added/removed/edited, never in response to a toggle), so flipping any switch never
+    /// reflows the menu — that reflow was what made the auto-switch row appear to "flip".
     private var manuallySelectableProfiles: [Profile] {
-        profileManager.profiles.filter { $0.triggerRules.isEmpty }
+        profileManager.profiles
     }
 
     @ViewBuilder
