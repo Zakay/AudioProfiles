@@ -1,5 +1,14 @@
 import SwiftUI
 
+/// Consistent leading icon for every menu row: same glyph size, same 24pt column, so all row
+/// labels line up and icons look uniform. Shared by the rows and the FeatureToggleRow struct.
+private func menuRowIcon(_ name: String, color: Color = .secondary) -> some View {
+    Image(systemName: name)
+        .font(.system(size: 14))
+        .foregroundColor(color)
+        .frame(width: 24, alignment: .center)
+}
+
 /// Main menu bar popover — current status, a uniform set of feature toggles, quick profile
 /// switch, and actions.
 struct ProfileMenuView: View {
@@ -53,18 +62,12 @@ struct ProfileMenuView: View {
 
             Divider()
 
-            Button("Configure…") {
+            menuActionRow(icon: "gearshape", title: "Configure…") {
                 dismissPopover()
                 WindowManager.shared.openConfigurationWindow()
             }
-            .buttonStyle(MenuRowButtonStyle())
-
-            Button("About") { openAboutWindow() }
-                .buttonStyle(MenuRowButtonStyle())
-
-            Button("Quit") { NSApp.terminate(nil) }
-                .keyboardShortcut("q")
-                .buttonStyle(MenuRowButtonStyle())
+            menuActionRow(icon: "info.circle", title: "About") { openAboutWindow() }
+            menuActionRow(icon: "power", title: "Quit") { NSApp.terminate(nil) }
         }
         .padding(12)
         // Fixed width so the popover doesn't resize (and reflow/re-wrap every other row) as
@@ -72,33 +75,53 @@ struct ProfileMenuView: View {
         .frame(width: 280)
     }
 
-    // MARK: - Status Header
+    // MARK: - Status Header (graphical)
+
+    private var profileColor: Color {
+        isSystemDefaultActive ? .secondary
+            : (profileManager.activeMode == .public ? .blue : .purple)
+    }
 
     private var statusHeader: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 0) {
-                Image(systemName: currentProfileIcon)
-                    .foregroundColor(isSystemDefaultActive ? .secondary
-                                     : (profileManager.activeMode == .public ? .blue : .purple))
-                    .frame(width: 24)
-                Text(profileManager.activeProfile?.name ?? viewModel.title)
-                    .font(.headline)
-                    .lineLimit(1)
-                Spacer()
-                if activeProfileHasModes { modeToggle }
-            }
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: currentProfileIcon)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(profileColor)
+                .frame(width: 34, height: 34)
+                .background(RoundedRectangle(cornerRadius: 8).fill(profileColor.opacity(0.15)))
 
-            if let output = profileManager.activeOutputDeviceName {
-                deviceRow(icon: "speaker.wave.2", name: output)
-            }
-            if let input = profileManager.activeInputDeviceName {
-                deviceRow(icon: "mic", name: input)
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 6) {
+                    Text(profileManager.activeProfile?.name ?? viewModel.title)
+                        .font(.headline)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                    if activeProfileHasModes { modeToggle }
+                }
+
+                VStack(alignment: .leading, spacing: 3) {
+                    if let output = profileManager.activeOutputDeviceName {
+                        statusDeviceRow(icon: "speaker.wave.2", name: output)
+                    }
+                    if let input = profileManager.activeInputDeviceName {
+                        statusDeviceRow(icon: "mic", name: input)
+                    }
+                }
             }
         }
-        // Match MenuRowButtonStyle's horizontal content inset (12) so the header icons/text
-        // line up with the toggle rows below.
         .padding(.horizontal, 12)
-        .padding(.top, 2)
+        .padding(.top, 4)
+        .padding(.bottom, 2)
+    }
+
+    private func statusDeviceRow(icon: String, name: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: icon)
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+                .frame(width: 14, alignment: .center)
+            Text(name).font(.caption).foregroundColor(.secondary).lineLimit(1)
+        }
     }
 
     /// Public/Private switch — only shown when the active profile has different device
@@ -119,17 +142,6 @@ struct ProfileMenuView: View {
         .help("Switch to \(profileManager.activeMode == .public ? ProfileMode.private.displayName : ProfileMode.public.displayName) mode")
     }
 
-    private func deviceRow(icon: String, name: String) -> some View {
-        HStack(spacing: 0) {
-            Image(systemName: icon)
-                .foregroundColor(.secondary)
-                .font(.caption)
-                .frame(width: 16, height: 16)
-                .frame(width: 24)
-            Text(name).font(.caption).foregroundColor(.secondary).lineLimit(1)
-        }
-    }
-
     // MARK: - Uniform feature toggle
 
     private func featureToggle(icon: String, title: String, isOn: Bool,
@@ -146,6 +158,19 @@ struct ProfileMenuView: View {
         .id("toggle-\(title)")
     }
 
+    // MARK: - Action rows
+
+    private func menuActionRow(icon: String, title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 0) {
+                menuRowIcon(icon)
+                Text(title)
+                Spacer()
+            }
+        }
+        .buttonStyle(MenuRowButtonStyle())
+    }
+
     // MARK: - Profile Switcher (manual)
 
     /// All profiles are manually selectable. The list is constant (it only changes when profiles
@@ -159,12 +184,14 @@ struct ProfileMenuView: View {
     private var profileSwitcher: some View {
         ForEach(manuallySelectableProfiles) { profile in
             Button(action: { ProfileManager.shared.activateProfile(with: profile.id, isManual: true) }) {
-                HStack {
-                    Image(systemName: profile.iconName).frame(width: 16, height: 16).frame(width: 24)
+                HStack(spacing: 0) {
+                    menuRowIcon(profile.iconName)
                     Text(profile.name).lineLimit(1)
                     Spacer()
                     if profileManager.activeProfile?.id == profile.id {
-                        Image(systemName: "checkmark").foregroundColor(.accentColor)
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(.accentColor)
                     }
                 }
             }
@@ -208,10 +235,7 @@ private struct FeatureToggleRow: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 0) {
-                Image(systemName: icon)
-                    .foregroundColor(.secondary)
-                    .frame(width: 16, height: 16)
-                    .frame(width: 24)
+                menuRowIcon(icon)
                 Text(title)
                 Spacer()
                 AccentSwitch(isOn: isOn)
