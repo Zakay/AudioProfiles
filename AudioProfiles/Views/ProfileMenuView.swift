@@ -132,29 +132,15 @@ struct ProfileMenuView: View {
 
     // MARK: - Uniform feature toggle
 
-    /// One feature row with the shared AccentSwitch. `subordinate` rows dim when the master
-    /// "Enabled" switch is off (they have no effect while the app is disabled).
     private func featureToggle(icon: String, title: String, isOn: Bool,
                                subordinate: Bool = false, action: @escaping () -> Void) -> some View {
-        let dimmed = subordinate && profileManager.isProcessingBypassed
-        return Button(action: action) {
-            HStack(spacing: 0) {
-                // Constant color: the AccentSwitch is the sole state indicator, so flipping a
-                // toggle animates only the switch instead of snapping the whole row's icon color.
-                Image(systemName: icon)
-                    .foregroundColor(.secondary)
-                    .frame(width: 16, height: 16)
-                    .frame(width: 24)
-                Text(title)
-                Spacer()
-                AccentSwitch(isOn: isOn)
-            }
-            .opacity(dimmed ? 0.5 : 1)
-        }
-        .buttonStyle(MenuRowButtonStyle())
-        // Pin identity so a state change updates the row in place instead of SwiftUI
-        // removing+inserting it (which animated as the row being replaced).
-        .id("toggle-\(title)")
+        FeatureToggleRow(
+            icon: icon,
+            title: title,
+            isOn: isOn,
+            dimmed: subordinate && profileManager.isProcessingBypassed,
+            action: action
+        )
     }
 
     // MARK: - Profile Switcher (manual)
@@ -206,5 +192,33 @@ struct ProfileMenuView: View {
     private func openAboutWindow() {
         dismissPopover()
         WindowManager.shared.openAboutWindow()
+    }
+}
+
+/// One feature row with the shared AccentSwitch. A dedicated View (not a helper function) so
+/// SwiftUI has unambiguous per-row identity and updates it in place, instead of treating a
+/// state change as a remove+insert (which looked like the row being replaced). `dimmed` rows
+/// are subordinate to the master switch and have no effect while it's off.
+private struct FeatureToggleRow: View {
+    let icon: String
+    let title: String
+    let isOn: Bool
+    let dimmed: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 0) {
+                Image(systemName: icon)
+                    .foregroundColor(.secondary)
+                    .frame(width: 16, height: 16)
+                    .frame(width: 24)
+                Text(title)
+                Spacer()
+                AccentSwitch(isOn: isOn)
+            }
+            .opacity(dimmed ? 0.5 : 1)
+        }
+        .buttonStyle(MenuRowButtonStyle())
     }
 }

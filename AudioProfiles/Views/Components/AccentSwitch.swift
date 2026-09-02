@@ -19,6 +19,5 @@ struct AccentSwitch: View {
                     .frame(width: 14, height: 14)
                     .offset(x: isOn ? 7 : -7)
             )
-            .animation(.easeInOut(duration: 0.15), value: isOn)
     }
 }
