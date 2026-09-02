@@ -148,15 +148,12 @@ struct ProfileMenuView: View {
 
     // MARK: - Profile Switcher (manual)
 
-    /// Profiles worth offering for manual selection. With auto-switching on, only trigger-less
-    /// profiles (which have no automatic activation path) plus System Default are manual; trigger
-    /// profiles are managed by device detection. With auto-switching off, nothing auto-activates,
-    /// so every profile is manually selectable.
+    /// Profiles worth offering for manual selection: trigger-less profiles (which have no
+    /// automatic activation path) plus System Default. Trigger profiles are managed by device
+    /// detection, so they're intentionally not listed here. This list is independent of the
+    /// auto-switch toggle so flipping that switch doesn't reflow the menu.
     private var manuallySelectableProfiles: [Profile] {
-        if profileManager.isAutoSwitchingDisabled {
-            return profileManager.profiles
-        }
-        return profileManager.profiles.filter { $0.triggerRules.isEmpty }
+        profileManager.profiles.filter { $0.triggerRules.isEmpty }
     }
 
     @ViewBuilder
