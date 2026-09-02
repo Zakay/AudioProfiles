@@ -46,7 +46,7 @@ struct ProfileMenuView: View {
                 }
             }
 
-            if hasUserProfiles {
+            if manuallySelectableProfiles.count > 1 {
                 Divider()
                 profileSwitcher
             }
@@ -152,9 +152,20 @@ struct ProfileMenuView: View {
 
     // MARK: - Profile Switcher (manual)
 
+    /// Profiles worth offering for manual selection. With auto-switching on, only trigger-less
+    /// profiles (which have no automatic activation path) plus System Default are manual; trigger
+    /// profiles are managed by device detection. With auto-switching off, nothing auto-activates,
+    /// so every profile is manually selectable.
+    private var manuallySelectableProfiles: [Profile] {
+        if profileManager.isAutoSwitchingDisabled {
+            return profileManager.profiles
+        }
+        return profileManager.profiles.filter { $0.triggerRules.isEmpty }
+    }
+
     @ViewBuilder
     private var profileSwitcher: some View {
-        ForEach(profileManager.profiles) { profile in
+        ForEach(manuallySelectableProfiles) { profile in
             Button(action: { ProfileManager.shared.activateProfile(with: profile.id, isManual: true) }) {
                 HStack {
                     Image(systemName: profile.iconName).frame(width: 16, height: 16).frame(width: 24)
@@ -177,10 +188,6 @@ struct ProfileMenuView: View {
 
     private var isSystemDefaultActive: Bool {
         profileManager.activeProfile?.isSystemDefault ?? false
-    }
-
-    private var hasUserProfiles: Bool {
-        profileManager.profiles.contains { !$0.isSystemDefault }
     }
 
     private var activeProfileHasModes: Bool {
