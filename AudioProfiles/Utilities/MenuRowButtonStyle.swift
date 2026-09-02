@@ -39,8 +39,11 @@ struct MenuRowButtonStyle: ButtonStyle {
             )
             .contentShape(RoundedRectangle(cornerRadius: 6))
             .onHover { hover = $0 }
+            // Animate ONLY the hover background. Do NOT animate on textColor: it changes on
+            // press, which coincides with a toggle flip, and that transaction would cross-fade
+            // the whole row's content (looking like the row is replaced) instead of letting the
+            // switch animate on its own.
             .animation(.easeInOut(duration: 0.12), value: hover)
-            .animation(.easeInOut(duration: 0.12), value: textColor)  // Animate text color changes too
         }
     }
 } 
