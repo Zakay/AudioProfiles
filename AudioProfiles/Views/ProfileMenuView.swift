@@ -152,6 +152,9 @@ struct ProfileMenuView: View {
             .opacity(dimmed ? 0.5 : 1)
         }
         .buttonStyle(MenuRowButtonStyle())
+        // Pin identity so a state change updates the row in place instead of SwiftUI
+        // removing+inserting it (which animated as the row being replaced).
+        .id("toggle-\(title)")
     }
 
     // MARK: - Profile Switcher (manual)

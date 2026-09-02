@@ -110,7 +110,8 @@ final class StatusItemManager: NSObject, ObservableObject, NSPopoverDelegate {
 
         // Create popover
         let popover = NSPopover()
-        popover.contentSize = NSSize(width: 240, height: 400)
+        // Width matches ProfileMenuView's fixed frame so the hosting view doesn't re-layout.
+        popover.contentSize = NSSize(width: 280, height: 400)
         popover.behavior = .applicationDefined  // We'll handle closing manually
         popover.animates = true  // Enable native fade animations like standard menus
 
