@@ -141,6 +141,9 @@ struct ProfileMenuView: View {
             dimmed: subordinate && profileManager.isProcessingBypassed,
             action: action
         )
+        // Pin identity so a state change updates the row in place rather than SwiftUI
+        // removing+inserting it (which looked like the row being replaced).
+        .id("toggle-\(title)")
     }
 
     // MARK: - Profile Switcher (manual)
