@@ -208,10 +208,12 @@ struct ProfileMenuView: View {
                     HStack(spacing: 6) {
                         // Bolt = this profile activates automatically when its trigger device connects.
                         if !profile.triggerRules.isEmpty {
+                            let autoActive = profileManager.activeProfile?.id == profile.id
+                                && !profileManager.hasActiveManualOverride
                             Image(systemName: "bolt.fill")
                                 .font(.system(size: 10))
-                                .foregroundColor(.secondary)
-                                .help("Activates automatically when its device connects")
+                                .foregroundColor(autoActive ? .green : .secondary)
+                                .help(autoActive ? "Active now via its device" : "Activates automatically when its device connects")
                         }
                         if profileManager.activeProfile?.id == profile.id {
                             Image(systemName: "checkmark")
@@ -227,61 +229,40 @@ struct ProfileMenuView: View {
 
     // MARK: - Content Modes Section (manual mode selection, mirrors the profile list)
 
+    /// Manual mode override. Auto (no forced mode) is the default, so it isn't a row — tapping a
+    /// forced mode again clears the override and returns to auto-detection.
     @ViewBuilder
     private var contentModesSection: some View {
-        // Auto: return to detection. Shows the currently-detected mode as a trailing hint.
-        contentModeRow(
-            title: "Auto",
-            icon: "wand.and.stars",
-            detail: soundModes.manualOverride == nil && soundModes.activeContentMode != .none
-                ? soundModes.activeContentMode.displayName : nil,
-            isActive: soundModes.manualOverride == nil,
-            autoDetected: false
-        ) {
-            soundModes.setManualOverride(nil)
-        }
-
         ForEach(ContentModeType.allCases.filter { $0 != .none }, id: \.self) { mode in
-            contentModeRow(
-                title: mode.displayName,
-                icon: mode.iconName,
-                detail: nil,
-                isActive: soundModes.manualOverride == mode,
-                autoDetected: mode == .music || mode == .voice
-            ) {
-                soundModes.setManualOverride(mode)
-            }
-        }
-    }
+            let autoDetectable = (mode == .music || mode == .voice)
+            let isForced = soundModes.manualOverride == mode
+            let isAutoActive = soundModes.manualOverride == nil && soundModes.activeContentMode == mode
 
-    private func contentModeRow(title: String, icon: String, detail: String?,
-                                isActive: Bool, autoDetected: Bool,
-                                action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 0) {
-                menuRowIcon(icon)
-                Text(title).lineLimit(1)
-                Spacer()
-                HStack(spacing: 6) {
-                    if let detail {
-                        Text(detail).font(.caption).foregroundColor(.secondary)
-                    }
-                    // Bolt = this mode is detected automatically (Music / Voice).
-                    if autoDetected {
-                        Image(systemName: "bolt.fill")
-                            .font(.system(size: 10))
-                            .foregroundColor(.secondary)
-                            .help("Detected automatically")
-                    }
-                    if isActive {
-                        Image(systemName: "checkmark")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundColor(.accentColor)
+            Button(action: { soundModes.setManualOverride(isForced ? nil : mode) }) {
+                HStack(spacing: 0) {
+                    menuRowIcon(mode.iconName)
+                    Text(mode.displayName).lineLimit(1)
+                    Spacer()
+                    HStack(spacing: 6) {
+                        // Bolt: green when this mode is auto-detected and active now, grey when it's
+                        // just auto-detectable. A forced mode shows the checkmark instead.
+                        if autoDetectable {
+                            Image(systemName: "bolt.fill")
+                                .font(.system(size: 10))
+                                .foregroundColor(isAutoActive ? .green : .secondary)
+                                .help(isAutoActive ? "Detected and active now" : "Detected automatically")
+                        }
+                        if soundModes.activeContentMode == mode {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundColor(.accentColor)
+                        }
                     }
                 }
             }
+            .buttonStyle(MenuRowButtonStyle())
+            .help(isForced ? "Forced. Tap to return to Auto." : "Tap to force this mode")
         }
-        .buttonStyle(MenuRowButtonStyle())
     }
 
     // MARK: - Helpers
