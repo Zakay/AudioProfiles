@@ -192,7 +192,7 @@ struct ProfileMenuView: View {
 
     /// All profiles are manually selectable. The list is constant (it only changes when profiles
     /// are added/removed/edited, never in response to a toggle), so flipping any switch never
-    /// reflows the menu — that reflow was what made the auto-switch row appear to "flip".
+    /// reflows the menu. That reflow was what made the auto-switch row appear to "flip".
     private var manuallySelectableProfiles: [Profile] {
         profileManager.profiles
     }
@@ -205,25 +205,36 @@ struct ProfileMenuView: View {
                     menuRowIcon(profile.iconName)
                     Text(profile.name).lineLimit(1)
                     Spacer()
-                    HStack(spacing: 6) {
-                        // Bolt = this profile activates automatically when its trigger device connects.
-                        if !profile.triggerRules.isEmpty {
-                            let autoActive = profileManager.activeProfile?.id == profile.id
-                                && !profileManager.hasActiveManualOverride
-                            Image(systemName: "bolt.fill")
-                                .font(.system(size: 10))
-                                .foregroundColor(autoActive ? .green : .secondary)
-                                .help(autoActive ? "Active now via its device" : "Activates automatically when its device connects")
-                        }
-                        if profileManager.activeProfile?.id == profile.id {
-                            Image(systemName: "checkmark")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundColor(.accentColor)
-                        }
-                    }
+                    rowIndicator(
+                        isActive: profileManager.activeProfile?.id == profile.id,
+                        isAutoActive: profileManager.activeProfile?.id == profile.id
+                            && !profileManager.hasActiveManualOverride,
+                        autoCapable: !profile.triggerRules.isEmpty
+                    )
                 }
             }
             .buttonStyle(MenuRowButtonStyle())
+        }
+    }
+
+    /// One trailing indicator per row (never two). Green bolt = active via auto; accent
+    /// checkmark = active manually/forced; grey bolt = auto capable but inactive; nothing otherwise.
+    @ViewBuilder
+    private func rowIndicator(isActive: Bool, isAutoActive: Bool, autoCapable: Bool) -> some View {
+        if isAutoActive {
+            Image(systemName: "bolt.fill")
+                .font(.system(size: 11))
+                .foregroundColor(.green)
+                .help("Active now, automatically")
+        } else if isActive {
+            Image(systemName: "checkmark")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(.accentColor)
+        } else if autoCapable {
+            Image(systemName: "bolt.fill")
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+                .help("Activates automatically")
         }
     }
 
@@ -243,21 +254,11 @@ struct ProfileMenuView: View {
                     menuRowIcon(mode.iconName)
                     Text(mode.displayName).lineLimit(1)
                     Spacer()
-                    HStack(spacing: 6) {
-                        // Bolt: green when this mode is auto-detected and active now, grey when it's
-                        // just auto-detectable. A forced mode shows the checkmark instead.
-                        if autoDetectable {
-                            Image(systemName: "bolt.fill")
-                                .font(.system(size: 10))
-                                .foregroundColor(isAutoActive ? .green : .secondary)
-                                .help(isAutoActive ? "Detected and active now" : "Detected automatically")
-                        }
-                        if soundModes.activeContentMode == mode {
-                            Image(systemName: "checkmark")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundColor(.accentColor)
-                        }
-                    }
+                    rowIndicator(
+                        isActive: soundModes.activeContentMode == mode,
+                        isAutoActive: isAutoActive,
+                        autoCapable: autoDetectable
+                    )
                 }
             }
             .buttonStyle(MenuRowButtonStyle())
