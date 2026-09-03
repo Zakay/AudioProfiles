@@ -62,6 +62,11 @@ struct ProfileMenuView: View {
                 profileSwitcher
             }
 
+            if installService.isInstalled && soundModes.isEnabled {
+                Divider()
+                contentModesSection
+            }
+
             Divider()
 
             menuActionRow(icon: "gearshape", title: "Configure…") {
@@ -218,6 +223,65 @@ struct ProfileMenuView: View {
             }
             .buttonStyle(MenuRowButtonStyle())
         }
+    }
+
+    // MARK: - Content Modes Section (manual mode selection, mirrors the profile list)
+
+    @ViewBuilder
+    private var contentModesSection: some View {
+        // Auto: return to detection. Shows the currently-detected mode as a trailing hint.
+        contentModeRow(
+            title: "Auto",
+            icon: "wand.and.stars",
+            detail: soundModes.manualOverride == nil && soundModes.activeContentMode != .none
+                ? soundModes.activeContentMode.displayName : nil,
+            isActive: soundModes.manualOverride == nil,
+            autoDetected: false
+        ) {
+            soundModes.setManualOverride(nil)
+        }
+
+        ForEach(ContentModeType.allCases.filter { $0 != .none }, id: \.self) { mode in
+            contentModeRow(
+                title: mode.displayName,
+                icon: mode.iconName,
+                detail: nil,
+                isActive: soundModes.manualOverride == mode,
+                autoDetected: mode == .music || mode == .voice
+            ) {
+                soundModes.setManualOverride(mode)
+            }
+        }
+    }
+
+    private func contentModeRow(title: String, icon: String, detail: String?,
+                                isActive: Bool, autoDetected: Bool,
+                                action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 0) {
+                menuRowIcon(icon)
+                Text(title).lineLimit(1)
+                Spacer()
+                HStack(spacing: 6) {
+                    if let detail {
+                        Text(detail).font(.caption).foregroundColor(.secondary)
+                    }
+                    // Bolt = this mode is detected automatically (Music / Voice).
+                    if autoDetected {
+                        Image(systemName: "bolt.fill")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                            .help("Detected automatically")
+                    }
+                    if isActive {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(.accentColor)
+                    }
+                }
+            }
+        }
+        .buttonStyle(MenuRowButtonStyle())
     }
 
     // MARK: - Helpers
