@@ -494,6 +494,16 @@ final class EQEngineService: ObservableObject {
             return
         }
 
+        // Re-assert the transferred state now that the virtual device is the default output:
+        // macOS can restore a device's remembered volume when it becomes default, which would
+        // silently overwrite the value we just verified onto the virtual driver.
+        _ = outputStateService.applyAndVerify(
+            initialVirtualState,
+            to: virtualObjectID,
+            context: "re-asserting virtual state after it became default"
+        )
+        AppLogger.error("[EQ-DIAG] handoff: hw snapshot=\(hardwareState) → virtual now=\(outputStateService.readState(from: virtualObjectID))")
+
         // Only after the virtual device owns the user's state, remove the second
         // gain/mute stage from the physical endpoint.
         guard outputStateService.applyAndVerify(
@@ -515,6 +525,8 @@ final class EQEngineService: ObservableObject {
             pipelineState = .idle
             return
         }
+
+        AppLogger.error("[EQ-DIAG] handoff: hardware now=\(outputStateService.readState(from: realObjectID)) (expected full gain/unmuted)")
 
         if let currentDefault = controlService.getDefaultOutputDevice() {
             AppLogger.info("EQEngineService: verified default output = '\(currentDefault.name)'")
