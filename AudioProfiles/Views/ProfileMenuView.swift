@@ -18,6 +18,7 @@ struct ProfileMenuView: View {
     @StateObject private var profileManager = ProfileManager.shared
     @ObservedObject private var installService = EQInstallationService.shared
     @ObservedObject private var soundModes = SoundModesStore.shared
+    @ObservedObject private var engine = EQEngineService.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -106,6 +107,16 @@ struct ProfileMenuView: View {
                     }
                     if let input = profileManager.activeInputDeviceName {
                         statusDeviceRow(icon: "mic", name: input)
+                    }
+                    // Whether audio is actually flowing through the virtual driver right now.
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(engine.isRunning ? Color.green : Color.secondary)
+                            .frame(width: 6, height: 6)
+                            .frame(width: 14, alignment: .center)
+                        Text(engine.isRunning ? "Processing active" : "Direct to hardware")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
                     }
                 }
             }
