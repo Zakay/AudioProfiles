@@ -39,7 +39,7 @@ struct HomeTabView: View {
                     .fontWeight(.semibold)
                 Text(processingOn
                      ? "Profiles, EQ & content modes active"
-                     : "Off — audio untouched, no auto-switching")
+                     : "Off · audio untouched, no auto-switching")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }

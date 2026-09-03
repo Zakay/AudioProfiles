@@ -18,7 +18,7 @@ struct SoundModeEditorView: View {
                     .foregroundColor(.accentColor)
                     .font(.title2)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("\(mode.displayName) Mode — EQ Overlay")
+                    Text("\(mode.displayName) Mode · EQ Overlay")
                         .font(.title3)
                         .fontWeight(.semibold)
                     Text("These adjustments stack on top of your device correction EQ")

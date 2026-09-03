@@ -487,10 +487,11 @@ struct EqualizerVisual: View {
 struct ContentModesVisual: View {
     @State private var appeared = false
     private let modes: [ContentModeType] = [.music, .voice, .movie, .gaming]
+    private let autoDetected: Set<ContentModeType> = [.music, .voice]
 
     var body: some View {
         VStack(spacing: 18) {
-            HStack(spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
                 ForEach(Array(modes.enumerated()), id: \.element) { index, mode in
                     VStack(spacing: 6) {
                         Image(systemName: mode.iconName)
@@ -501,6 +502,13 @@ struct ContentModesVisual: View {
                         Text(mode.displayName)
                             .font(.caption2)
                             .foregroundColor(.secondary)
+                        if autoDetected.contains(mode) {
+                            Text("Auto")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundColor(.green)
+                                .padding(.horizontal, 5).padding(.vertical, 1)
+                                .background(Capsule().fill(Color.green.opacity(0.15)))
+                        }
                     }
                     .opacity(appeared ? 1 : 0)
                     .animation(.easeIn(duration: 0.4).delay(Double(index) * 0.1), value: appeared)
@@ -511,7 +519,7 @@ struct ContentModesVisual: View {
                 Image(systemName: "wand.and.stars")
                     .font(.caption)
                     .foregroundColor(.green)
-                Text("Detected automatically from what you're playing")
+                Text("Voice and music switch automatically. Pick any mode yourself.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -744,7 +752,7 @@ struct OnboardingPage {
         OnboardingPage(
             type: .contentModes,
             title: "Sound Modes for What You Play",
-            description: "Beyond per-device EQ, AudioProfiles adds a matching sound profile for what you're doing — a clearer curve for voice on calls, a fuller curve for music — detected automatically from what's playing. Night Mode softens the sound for late-night listening."
+            description: "Beyond per-device EQ, AudioProfiles adds a matching sound profile: a clearer curve for voice on calls, a fuller curve for music. Voice and music switch automatically; pick Movie, Gaming, or other modes yourself. Night Mode softens the sound for late-night listening."
         ),
         OnboardingPage(
             type: .gettingStarted,

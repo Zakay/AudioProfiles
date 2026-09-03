@@ -48,7 +48,7 @@ struct EQDriverInstallSheet: View {
 
             VStack(alignment: .leading, spacing: 8) {
                 FeatureRow(icon: "headphones",  text: "Apply per-device EQ curves to any output")
-                FeatureRow(icon: "eye.slash",   text: "Invisible when not in use — no clutter")
+                FeatureRow(icon: "eye.slash",   text: "Invisible when not in use, no clutter")
                 FeatureRow(icon: "lock.shield", text: "Runs inside macOS audio system, no background process")
             }
             .padding()

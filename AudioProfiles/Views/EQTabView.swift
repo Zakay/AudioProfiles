@@ -64,7 +64,7 @@ struct EQTabView: View {
                 ))
                 .toggleStyle(.switch)
                 .labelsHidden()
-                .help("Master EQ toggle — disables all audio processing when off")
+                .help("Master EQ toggle. Disables all audio processing when off.")
             }
 
             // Device picker + EQ active badge + reset

@@ -17,7 +17,7 @@ struct NightModeEditorView: View {
                     .foregroundColor(.indigo)
                     .font(.title2)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("Night Mode — EQ Overlay")
+                    Text("Night Mode · EQ Overlay")
                         .font(.title3)
                         .fontWeight(.semibold)
                     Text("Reduces bass and boosts clarity for quiet listening")
