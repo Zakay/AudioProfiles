@@ -200,10 +200,19 @@ struct ProfileMenuView: View {
                     menuRowIcon(profile.iconName)
                     Text(profile.name).lineLimit(1)
                     Spacer()
-                    if profileManager.activeProfile?.id == profile.id {
-                        Image(systemName: "checkmark")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundColor(.accentColor)
+                    HStack(spacing: 6) {
+                        // Bolt = this profile activates automatically when its trigger device connects.
+                        if !profile.triggerRules.isEmpty {
+                            Image(systemName: "bolt.fill")
+                                .font(.system(size: 10))
+                                .foregroundColor(.secondary)
+                                .help("Activates automatically when its device connects")
+                        }
+                        if profileManager.activeProfile?.id == profile.id {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundColor(.accentColor)
+                        }
                     }
                 }
             }
