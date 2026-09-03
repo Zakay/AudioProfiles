@@ -147,6 +147,8 @@ struct OnboardingPageView: View {
                     SmartSwitchingVisual()
                 case .equalizer:
                     EqualizerVisual()
+                case .contentModes:
+                    ContentModesVisual()
                 case .gettingStarted:
                     GettingStartedVisual()
                 }
@@ -482,6 +484,45 @@ struct EqualizerVisual: View {
     }
 }
 
+struct ContentModesVisual: View {
+    @State private var appeared = false
+    private let modes: [ContentModeType] = [.music, .voice, .movie, .gaming]
+
+    var body: some View {
+        VStack(spacing: 18) {
+            HStack(spacing: 12) {
+                ForEach(Array(modes.enumerated()), id: \.element) { index, mode in
+                    VStack(spacing: 6) {
+                        Image(systemName: mode.iconName)
+                            .font(.system(size: 22))
+                            .foregroundColor(.green)
+                            .frame(width: 48, height: 48)
+                            .background(RoundedRectangle(cornerRadius: 12).fill(Color.green.opacity(0.12)))
+                        Text(mode.displayName)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                    .opacity(appeared ? 1 : 0)
+                    .animation(.easeIn(duration: 0.4).delay(Double(index) * 0.1), value: appeared)
+                }
+            }
+
+            HStack(spacing: 6) {
+                Image(systemName: "wand.and.stars")
+                    .font(.caption)
+                    .foregroundColor(.green)
+                Text("Detected automatically from what you're playing")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .opacity(appeared ? 1 : 0)
+            .animation(.easeIn(duration: 0.4).delay(0.4), value: appeared)
+        }
+        .onAppear { appeared = true }
+        .onDisappear { appeared = false }
+    }
+}
+
 /// Lightweight EQ graph for onboarding — draws EQ curve, band dots, and optional FR overlay
 private struct OnboardingEQGraph: View {
     let settings: EQSettings
@@ -676,7 +717,7 @@ struct OnboardingPage {
     let description: String
     
     enum PageType {
-        case welcome, profiles, smartSwitching, equalizer, gettingStarted
+        case welcome, profiles, smartSwitching, equalizer, contentModes, gettingStarted
     }
 
     static let allPages = [
@@ -699,6 +740,11 @@ struct OnboardingPage {
             type: .equalizer,
             title: "Per-Device Equalizer",
             description: "Fine-tune your sound with a built-in 10-band EQ. Choose from 4,800+ headphone presets with calibrated target curves, or create your own custom EQ. Settings are saved per device."
+        ),
+        OnboardingPage(
+            type: .contentModes,
+            title: "Sound Modes for What You Play",
+            description: "Beyond per-device EQ, AudioProfiles adds a matching sound profile for what you're doing — a clearer curve for voice on calls, a fuller curve for music — detected automatically from what's playing. Night Mode softens the sound for late-night listening."
         ),
         OnboardingPage(
             type: .gettingStarted,
